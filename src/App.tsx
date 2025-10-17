@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, CSSProperties } from 'react';
 import Webcam from 'react-webcam';
 import {
-  Camera, Scan, Settings, ChevronDown, Eye, Palette, Volume2, Hand, Brain, Play, Accessibility, BookOpen, Type
+  Camera, Scan, Settings, ChevronDown, Eye, Palette, Volume2, Hand, Brain, Play, Accessibility, BookOpen, Type, MousePointerSquare
 } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
@@ -19,6 +19,7 @@ type ColorBlind = 'none' | 'protanopia' | 'deuteranopia' | 'tritanopia' | 'achro
 type HearingMode = 'normal' | 'mute';
 type MotorMode = 'normal' | 'singlehand';
 type CognitiveMode = 'normal' | 'dyslexia' | 'simplify';
+type ReaderMode = 'sequence' | 'selection' | 'blocks';
 
 function App() {
   const [isDetectionActive, setIsDetectionActive] = useState(false);
@@ -54,6 +55,14 @@ function App() {
 
   const [readerActive, setReaderActive] = useState(false);
   const [readerRate, setReaderRate] = useState(1.0);
+  const [readerMode, setReaderMode] = useState<ReaderMode>('sequence');
+  const [readerQueue, setReaderQueue] = useState<string[]>([]);
+  const readerUtterRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const [ttsVoices, setTtsVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [voiceReady, setVoiceReady] = useState(false);
+
+  const [selectedEl, setSelectedEl] = useState<HTMLElement | null>(null);
+  const selectedOutlineRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     return () => stopDetection();
@@ -74,7 +83,7 @@ function App() {
       }
       let clean = finalText.trim();
       if (!clean) return;
-      clean = clean.replace(/[^A-Za-z0-9 .,!?']/g, ''); // English-only
+      clean = clean.replace(/[^A-Za-z0-9 .,!?']/g, '');
       if (!clean) return;
       if (clean === lastAsrTextRef.current) return;
       lastAsrTextRef.current = clean;
@@ -341,68 +350,199 @@ function App() {
     }
   }, []);
 
-  const [readerQueue, setReaderQueue] = useState<string[]>([]);
-  const readerUtterRef = useRef<SpeechSynthesisUtterance | null>(null);
+  function pickVoice(voices: SpeechSynthesisVoice[]) {
+    const pref = ['en-US', 'en_US', 'en-GB', 'en_GB'];
+    for (const tag of pref) {
+      const v = voices.find(x => x.lang === tag);
+      if (v) return v;
+    }
+    return voices[0] || null;
+  }
 
-  const collectReadableText = useCallback(() => {
-    const root = document.querySelector('.cognitive-scope');
-    if (!root) return [];
+  function speakNow(text: string) {
+    if (!text) return;
+    try { speechSynthesis.cancel(); } catch {}
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = readerRate;
+    const v = pickVoice(ttsVoices);
+    if (v) u.voice = v;
+    u.lang = v?.lang || 'en-US';
+    u.onend = () => {
+      setReaderQueue(q => {
+        const nq = q.slice(1);
+        if (nq.length > 0) {
+          queueMicrotask(() => speakNow(nq[0]));
+        } else {
+          setReaderActive(false);
+        }
+        return nq;
+      });
+    };
+    try { speechSynthesis.speak(u); } catch {}
+    readerUtterRef.current = u;
+  }
+
+  useEffect(() => {
+    function loadVoices() {
+      const vs = speechSynthesis.getVoices();
+      if (vs && vs.length > 0) {
+        setTtsVoices(vs);
+        setVoiceReady(true);
+      }
+    }
+    loadVoices();
+    if (typeof window !== 'undefined') {
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        // @ts-ignore
+        window.speechSynthesis.onvoiceschanged = null;
+      }
+    };
+  }, []);
+
+  const collectReadableFromRoot = useCallback(() => {
+    const root = document.querySelector('.cognitive-scope') || document.body;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    const lines: string[] = [];
+    const raw: string[] = [];
     while (walker.nextNode()) {
       const t = walker.currentNode as Text;
       const s = (t.textContent || '').replace(/\s+/g, ' ').trim();
       if (!s) continue;
-      if (t.parentElement && t.parentElement.closest('button, code, pre, input, textarea, svg')) continue;
-      lines.push(s);
+      const p = t.parentElement;
+      if (!p) continue;
+      if (p.closest('button, code, pre, input, textarea, svg, canvas, video, [aria-hidden="true"]')) continue;
+      raw.push(s);
     }
-    const merged = [];
+    if (raw.length === 0) return ['Screen reader started. There is no readable text on screen.'];
+    const merged: string[] = [];
     let buf = '';
-    for (const line of lines) {
+    for (const line of raw) {
       buf += (buf ? ' ' : '') + line;
-      if (buf.length > 120) {
+      if (buf.length >= 140) {
         merged.push(buf);
         buf = '';
       }
     }
     if (buf) merged.push(buf);
-    return merged.slice(0, 30);
+    return merged.slice(0, 40);
+  }, []);
+
+  const collectReadableFromElement = useCallback((el: Element | null) => {
+    const root = (el as HTMLElement) || document.querySelector('.cognitive-scope') || document.body;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const raw: string[] = [];
+    while (walker.nextNode()) {
+      const t = walker.currentNode as Text;
+      const s = (t.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!s) continue;
+      const p = t.parentElement;
+      if (!p) continue;
+      if (p.closest('button, code, pre, input, textarea, svg, canvas, video, [aria-hidden="true"]')) continue;
+      raw.push(s);
+    }
+    if (raw.length === 0) return ['Selected area has no readable text.'];
+    const joined = raw.join(' ').replace(/\s{2,}/g, ' ').trim();
+    const chunks: string[] = [];
+    let i = 0;
+    while (i < joined.length) {
+      const end = Math.min(i + 160, joined.length);
+      chunks.push(joined.slice(i, end));
+      i = end;
+    }
+    return chunks.slice(0, 30);
+  }, []);
+
+  const collectReadableBlocks = useCallback(() => {
+    const scope = document.querySelector('.cognitive-scope') as HTMLElement | null;
+    if (!scope) return ['No readable blocks found.'];
+    const selectors = [
+      'section', 'article', '[role="region"]', '[role="main"]',
+      'h1', 'h2', 'h3',
+      '.bg-gray-800', '.rounded-xl', '.p-6'
+    ];
+    const nodes = Array.from(scope.querySelectorAll(selectors.join(','))) as HTMLElement[];
+    const blocks: string[] = [];
+    nodes.forEach(n => {
+      if (!n) return;
+      if (n.closest('header, nav, footer')) return;
+      const text = n.innerText ? n.innerText.replace(/\s+/g, ' ').trim() : '';
+      if (text && text.length > 20) {
+        const chunked: string[] = [];
+        let i = 0;
+        while (i < text.length) {
+          const end = Math.min(i + 180, text.length);
+          chunked.push(text.slice(i, end));
+          i = end;
+        }
+        blocks.push(...chunked);
+      }
+    });
+    if (blocks.length === 0) return ['No readable blocks found.'];
+    return blocks.slice(0, 40);
   }, []);
 
   const startReader = useCallback(() => {
-    const chunks = collectReadableText();
+    if (!voiceReady) {
+      const vs = speechSynthesis.getVoices();
+      if (vs.length > 0) setTtsVoices(vs);
+    }
+    let chunks: string[] = [];
+    if (readerMode === 'sequence') {
+      chunks = collectReadableFromRoot();
+    } else if (readerMode === 'selection') {
+      chunks = collectReadableFromElement(selectedEl);
+    } else {
+      chunks = collectReadableBlocks();
+    }
     if (chunks.length === 0) return;
     setReaderQueue(chunks);
     setReaderActive(true);
-  }, [collectReadableText]);
-
-  useEffect(() => {
-    if (!readerActive) {
-      speechSynthesis.cancel();
-      readerUtterRef.current = null;
-      return;
-    }
-    if (readerQueue.length === 0) {
-      setReaderActive(false);
-      return;
-    }
-    if (speechSynthesis.speaking) return;
-    const text = readerQueue[0];
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = readerRate;
-    u.lang = 'en-US';
-    u.onend = () => {
-      setReaderQueue(q => q.slice(1));
-    };
-    readerUtterRef.current = u;
-    speechSynthesis.speak(u);
-  }, [readerActive, readerQueue, readerRate]);
+    speakNow(chunks[0]);
+  }, [voiceReady, readerMode, selectedEl, collectReadableFromRoot, collectReadableFromElement, collectReadableBlocks]);
 
   const stopReader = useCallback(() => {
     setReaderActive(false);
     setReaderQueue([]);
-    speechSynthesis.cancel();
+    try { speechSynthesis.cancel(); } catch {}
+    readerUtterRef.current = null;
   }, []);
+
+  useEffect(() => {
+    function updateOutline() {
+      const box = selectedEl?.getBoundingClientRect();
+      const ol = selectedOutlineRef.current;
+      if (!ol) return;
+      if (!box || readerMode !== 'selection') {
+        ol.style.opacity = '0';
+        return;
+      }
+      ol.style.opacity = '1';
+      ol.style.left = `${box.left + window.scrollX}px`;
+      ol.style.top = `${box.top + window.scrollY}px`;
+      ol.style.width = `${box.width}px`;
+      ol.style.height = `${box.height}px`;
+    }
+    updateOutline();
+    window.addEventListener('scroll', updateOutline, { passive: true });
+    window.addEventListener('resize', updateOutline);
+    return () => {
+      window.removeEventListener('scroll', updateOutline);
+      window.removeEventListener('resize', updateOutline);
+    };
+  }, [selectedEl, readerMode]);
+
+  const onScopeClickCapture = useCallback((e: React.MouseEvent) => {
+    if (readerMode !== 'selection') return;
+    const target = e.target as HTMLElement;
+    if (!target) return;
+    if (target.closest('button, select, input, textarea, [role="button"]')) return;
+    const scope = document.querySelector('.cognitive-scope');
+    if (scope && scope.contains(target)) {
+      setSelectedEl(target.closest<HTMLElement>('*'));
+    }
+  }, [readerMode]);
 
   const colorFilterStyleRoot: CSSProperties = colorFilterStyle;
 
@@ -496,7 +636,7 @@ function App() {
               </div>
 
               <div className="grid md:grid-cols-2 gap-3">
-                <div className="flex flex-wrap gap-2 items-center">
+                <div className="flex flex-wrap gap-3 items-center">
                   <span className="text-sm text-gray-300 w-36 inline-flex items-center gap-2"><Brain className="w-4 h-4" /> Cognitive</span>
                   {(['normal','dyslexia','simplify'] as CognitiveMode[]).map(c=>(
                     <button key={c} onClick={()=>setCognitive(c)} className={`px-3 py-1.5 rounded text-sm border ${cognitive===c?'bg-pink-600 text-white border-pink-500':'bg-gray-700/50 border-gray-600 hover:bg-gray-700'}`}>{c}</button>
@@ -504,7 +644,7 @@ function App() {
                 </div>
 
                 <div className="flex flex-wrap gap-2 items-center">
-                  <span className="text-sm text-gray-300 w-36 inline-flex items-center gap-2"><BookOpen className="w-4 h-4" /> Screen Reader</span>
+                  <span className="text-sm text-gray-300 inline-flex items-center gap-2 w-44"><BookOpen className="w-4 h-4" /> Screen Reader</span>
                   <button
                     onClick={readerActive ? stopReader : startReader}
                     className={`px-3 py-1.5 rounded text-sm border ${readerActive?'bg-sky-600 text-white border-sky-500':'bg-gray-700/50 border-gray-600 hover:bg-gray-700'}`}
@@ -525,12 +665,28 @@ function App() {
                       <option value={3.0}>3.0x</option>
                     </select>
                   </label>
+                  <label className="text-sm flex items-center gap-2">
+                    <MousePointerSquare className="w-4 h-4" />
+                    <select
+                      value={readerMode}
+                      onChange={e=>setReaderMode(e.target.value as ReaderMode)}
+                      className="px-2 py-1.5 rounded text-sm bg-gray-700 border border-gray-600"
+                      title="Reading Mode"
+                    >
+                      <option value="sequence">Sequence</option>
+                      <option value="selection">Selection</option>
+                      <option value="blocks">Blocks</option>
+                    </select>
+                  </label>
+                  {readerMode === 'selection' && (
+                    <span className="text-xs text-amber-300">Click on an area to select it</span>
+                  )}
                 </div>
               </div>
             </div>
           )}
 
-          <div className="max-w-7xl mx-auto cognitive-scope">
+          <div className="max-w-7xl mx-auto cognitive-scope" onClickCapture={onScopeClickCapture}>
             <div className="grid lg:grid-cols-4 gap-6">
               <div className="lg:col-span-1 bg-gray-800 p-6 rounded-xl h-[calc(100vh-12rem)] sticky top-20 overflow-y-auto hidden md:block">
                 <div className="space-y-2">
@@ -544,7 +700,7 @@ function App() {
                 </div>
               </div>
 
-              <div className="lg:col-span-3 space-y-6">
+              <div className="lg:col-span-3 space-y-6 relative">
                 <div className="relative rounded-xl overflow-hidden bg-black h-[calc(100vh-12rem)]" style={colorFilterStyle}>
                   <Webcam
                     ref={webcamRef}
@@ -599,6 +755,12 @@ function App() {
                     </div>
                   </div>
                 )}
+
+                <div
+                  ref={selectedOutlineRef}
+                  className="pointer-events-none absolute border-4 border-amber-400 rounded-lg transition-all duration-150"
+                  style={{ left: 0, top: 0, width: 0, height: 0, opacity: 0 }}
+                />
               </div>
             </div>
           </div>
