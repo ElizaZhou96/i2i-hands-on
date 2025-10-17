@@ -136,10 +136,10 @@ function App() {
 
   const colorMap: { [key: string]: string } = {
     person: '#0072B2', book: '#56B4E9', 'cell phone': '#009E73', laptop: '#E69F00',
-    tv: '#CC79A7', bottle: '#F0E442', chair: '#8A4FAA', cup: '#5AC8FA',
+    paper: '#CC79A7', bottle: '#F0E442', chair: '#8A4FAA', cup: '#5AC8FA',
     keyboard: '#D55E00', mouse: '#8E8E93', remote: '#9C27B0', backpack: '#795548', default: '#8E8E93'
   };
-  const indoorObjects = ['person','book','cell phone','laptop','tv','bottle','chair','cup','keyboard','mouse','remote','backpack'];
+  const indoorObjects = ['person','book','cell phone','laptop','paper','bottle','chair','cup','keyboard','mouse','remote','backpack'];
   const getColorForClass = (c: string) => colorMap[c] || colorMap.default;
 
   const stopDetection = useCallback(() => {
