@@ -21,6 +21,7 @@ function App() {
   const [model, setModel] = useState<cocoSsd.ObjectDetection | null>(null);
   const [detectedObjects, setDetectedObjects] = useState<Array<{ class: string; score: number }>>([]);
   const previousObjectsRef = useRef<Set<string>>(new Set());
+  const spokenOnceRef = useRef<Set<string>>(new Set());
   const webcamRef = useRef<Webcam | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationFrameRef = useRef<number>();
@@ -33,7 +34,10 @@ function App() {
   const [motor, setMotor] = useState<MotorMode>('normal');
   const [cognitive, setCognitive] = useState<CognitiveMode>('normal');
 
+  const [controlsOpen, setControlsOpen] = useState(false);
+
   const [captions, setCaptions] = useState<string[]>([]);
+  const [hearingCaptions, setHearingCaptions] = useState<string[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   useAudioFilter(audioRef.current, hearing === 'lowpass' ? 'lowpass' : hearing === 'highpass' ? 'highpass' : 'none');
 
@@ -43,7 +47,10 @@ function App() {
   const micFilterRef = useRef<BiquadFilterNode | null>(null);
   const micGainRef = useRef<GainNode | null>(null);
 
-  const [controlsOpen, setControlsOpen] = useState(false);
+  const recognitionRef = useRef<any>(null);
+  const asrRestartRef = useRef(false);
+  const lastAsrTextRef = useRef<string>('');
+  const asrDebounceRef = useRef<number | null>(null);
 
   const ensureMic = useCallback(async () => {
     if (micStream) return micStream;
@@ -55,11 +62,15 @@ function App() {
   const wireMicGraph = useCallback((mode: HearingMode) => {
     if (!micStream) return;
     if (!micCtxRef.current) micCtxRef.current = new AudioContext();
-    const ctx = micCtxRef.current;
 
-    if (micSourceRef.current) micSourceRef.current.disconnect();
-    if (micFilterRef.current) micFilterRef.current.disconnect();
-    if (micGainRef.current) micGainRef.current.disconnect();
+    const ctx = micCtxRef.current;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+
+    try {
+      micSourceRef.current?.disconnect();
+      micFilterRef.current?.disconnect();
+      micGainRef.current?.disconnect();
+    } catch {}
 
     const source = ctx.createMediaStreamSource(micStream);
     const filter = ctx.createBiquadFilter();
@@ -81,8 +92,8 @@ function App() {
       source.connect(filter).connect(gain).connect(ctx.destination);
     } else {
       filter.type = 'allpass';
-      gain.gain.value = 0.0;
-      source.connect(filter).connect(gain).disconnect();
+      source.connect(filter);
+      try { filter.disconnect(); } catch {}
     }
 
     micSourceRef.current = source;
@@ -90,16 +101,9 @@ function App() {
     micGainRef.current = gain;
   }, [micStream]);
 
-  const recognitionRef = useRef<any>(null);
-  const [asrActive, setAsrActive] = useState(false);
-
   useEffect(() => {
     if (!audioRef.current) return;
-    if (hearing === 'normal') {
-      audioRef.current.muted = false;
-    } else {
-      audioRef.current.muted = true;
-    }
+    audioRef.current.muted = hearing !== 'normal';
   }, [hearing]);
 
   useEffect(() => {
@@ -110,12 +114,14 @@ function App() {
           await micCtxRef.current?.resume();
           wireMicGraph(hearing);
         } catch (e) {
-          console.warn('Microphone access failed or blocked.', e);
+          console.warn('Microphone unavailable.', e);
         }
       } else {
-        if (micSourceRef.current) micSourceRef.current.disconnect();
-        if (micFilterRef.current) micFilterRef.current.disconnect();
-        if (micGainRef.current) micGainRef.current.disconnect();
+        try {
+          micSourceRef.current?.disconnect();
+          micFilterRef.current?.disconnect();
+          micGainRef.current?.disconnect();
+        } catch {}
       }
     })();
   }, [hearing, ensureMic, wireMicGraph]);
@@ -127,48 +133,60 @@ function App() {
     const rec = new SR();
     rec.continuous = true;
     rec.interimResults = true;
-    rec.lang = 'en-US';
+    rec.lang = navigator.language || 'en-US';
     rec.onresult = (e: any) => {
-      let s = '';
+      let finalText = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        s += e.results[i][0].transcript;
+        if (e.results[i].isFinal) {
+          finalText += e.results[i][0].transcript;
+        }
       }
-      if (s.trim().length > 0) {
-        setCaptions((prev) => [s.trim(), ...prev].slice(0, 8));
-      }
+      if (finalText.trim().length === 0) return;
+      const clean = finalText.trim();
+      if (clean === lastAsrTextRef.current) return;
+      lastAsrTextRef.current = clean;
+      if (asrDebounceRef.current) window.clearTimeout(asrDebounceRef.current);
+      asrDebounceRef.current = window.setTimeout(() => {
+        setHearingCaptions(prev => [clean, ...prev].slice(0, 6));
+      }, 150);
     };
     rec.onend = () => {
       recognitionRef.current = null;
-      if (asrActive) startASR();
+      if (asrRestartRef.current) startASR();
     };
     recognitionRef.current = rec;
+    asrRestartRef.current = true;
     rec.start();
-  }, [asrActive]);
+  }, []);
 
   useEffect(() => {
     if (hearing === 'normal') {
-      setAsrActive(false);
+      asrRestartRef.current = false;
       recognitionRef.current?.stop();
       recognitionRef.current = null;
+      setHearingCaptions([]);
+      lastAsrTextRef.current = '';
+      if (asrDebounceRef.current) window.clearTimeout(asrDebounceRef.current);
+      asrDebounceRef.current = null;
       return;
     }
-    setAsrActive(true);
     startASR();
     return () => {
+      asrRestartRef.current = false;
       recognitionRef.current?.stop();
       recognitionRef.current = null;
     };
   }, [hearing, startASR]);
 
   const speak = useCallback((text: string) => {
-    if (isDetectionActive && isDetectionRunningRef.current) {
-      setCaptions((prev) => [text, ...prev].slice(0, 8));
-      if (hearing !== 'mute') {
-        const utterance = new SpeechSynthesisUtterance(text);
-        speechSynthesis.speak(utterance);
-      }
+    setCaptions(prev => [text, ...prev].slice(0, 6));
+    if (hearing !== 'mute') {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = navigator.language || 'en-US';
+      speechSynthesis.speak(u);
     }
-  }, [hearing, isDetectionActive]);
+  }, [hearing]);
 
   useEffect(() => {
     return () => {
@@ -184,7 +202,7 @@ function App() {
         const loadedModel = await cocoSsd.load({ base: 'mobilenet_v2' });
         setModel(loadedModel);
       } catch (error) {
-        console.error('TF init or model load error:', error);
+        console.error('TF init/model error:', error);
       }
     };
     initTF();
@@ -222,10 +240,9 @@ function App() {
     speechSynthesis.cancel();
     setDetectedObjects([]);
     previousObjectsRef.current.clear();
-    if (canvasRef.current) {
-      const ctx = canvasRef.current.getContext('2d');
-      ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-    }
+    spokenOnceRef.current.clear();
+    const ctx = canvasRef.current?.getContext('2d');
+    if (ctx && canvasRef.current) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
   }, []);
 
   const detectObjects = useCallback(async () => {
@@ -243,19 +260,27 @@ function App() {
       const predictions = await model.detect(video, undefined, 0.6);
       if (!isDetectionRunningRef.current) return;
 
-      const currentObjects = new Set(predictions.map(p => p.class));
-      currentObjects.forEach(obj => {
-        if (!previousObjectsRef.current.has(obj)) speak(`Detected ${obj}`);
+      const classes = predictions.map(p => p.class);
+      const nowSet = new Set(classes);
+      const newOnes: string[] = [];
+      nowSet.forEach(c => {
+        if (!previousObjectsRef.current.has(c)) newOnes.push(c);
       });
-      previousObjectsRef.current = currentObjects;
+      previousObjectsRef.current = nowSet;
 
       setDetectedObjects(predictions.map(p => ({ class: p.class, score: p.score })));
+
+      newOnes.forEach(c => {
+        if (!spokenOnceRef.current.has(c)) {
+          spokenOnceRef.current.add(c);
+          speak(`Detected ${c}`);
+        }
+      });
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       predictions.forEach(prediction => {
         const [x, y, width, height] = prediction.bbox;
         const color = getColorForClass(prediction.class);
-
         ctx.strokeStyle = color;
         ctx.lineWidth = 3;
         ctx.strokeRect(x, y, width, height);
@@ -264,7 +289,6 @@ function App() {
         const label = `${prediction.class} ${(prediction.score * 100).toFixed(1)}%`;
         const metrics = ctx.measureText(label);
         const pad = 8;
-
         ctx.fillStyle = color;
         ctx.fillRect(x - pad / 2, y - 30, metrics.width + pad * 2, 30);
         ctx.fillStyle = '#FFFFFF';
@@ -393,7 +417,7 @@ function App() {
                   </div>
                 </button>
                 <button
-                  onClick={() => setControlsOpen((v) => !v)}
+                  onClick={() => setControlsOpen(v => !v)}
                   className="px-3 py-1.5 rounded-md text-sm font-medium bg-gray-700 hover:bg-gray-600 flex items-center gap-2"
                 >
                   <Settings className="w-4 h-4" />
@@ -402,23 +426,22 @@ function App() {
                 </button>
               </div>
             </div>
-            {controlsOpen && (
-              <div className="bg-gray-800/95">
-                <div className="max-w-7xl mx-auto px-4 py-3">
-                  <AccessibilityPanel
-                    visual={visual} setVisual={setVisual}
-                    color={colorBlind} setColor={setColorBlind}
-                    hearing={hearing} setHearing={setHearing}
-                    motor={motor} setMotor={setMotor}
-                    cognitive={cognitive} setCognitive={setCognitive}
-                  />
-                </div>
-              </div>
-            )}
           </div>
         </header>
 
         <main className="container mx-auto px-4 pt-16 pb-6">
+          {controlsOpen && (
+            <div className="mb-4 bg-gray-800/95 rounded-xl p-4">
+              <AccessibilityPanel
+                visual={visual} setVisual={setVisual}
+                color={colorBlind} setColor={setColorBlind}
+                hearing={hearing} setHearing={setHearing}
+                motor={motor} setMotor={setMotor}
+                cognitive={cognitive} setCognitive={setCognitive}
+              />
+            </div>
+          )}
+
           <div className="max-w-7xl mx-auto cognitive-scope">
             <div className="grid lg:grid-cols-4 gap-6">
               <div className="lg:col-span-1 bg-gray-800 p-6 rounded-xl h-[calc(100vh-12rem)] sticky top-20 overflow-y-auto">
@@ -441,7 +464,7 @@ function App() {
                     <span className="text-sm text-gray-300">Sample Audio</span>
                     <audio ref={audioRef} src="/audio/sample.mp3" controls className="w-full" />
                   </div>
-                  <p className="text-xs text-gray-400">Microphone processing starts when mode ≠ normal. Live captions appear while any hearing mode is active.</p>
+                  <p className="text-xs text-gray-400">Live captions appear only when hearing mode is not normal.</p>
                 </div>
               </div>
 
@@ -474,7 +497,7 @@ function App() {
                   )}
 
                   <div className="absolute bottom-4 left-4 right-4 flex flex-col gap-1 items-stretch">
-                    {captions.map((c, i) => (
+                    {(hearing !== 'normal' ? hearingCaptions : captions).map((c, i) => (
                       <div key={i} className="bg-black/70 px-3 py-2 rounded text-sm border border-white/10">{c}</div>
                     ))}
                   </div>
