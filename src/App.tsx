@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, CSSProperties } from 'react';
 import Webcam from 'react-webcam';
 import {
-  Camera, Scan, Settings, ChevronDown, Eye, Palette, Volume2, Hand, Brain, Play, Accessibility, BookOpen, Type
+  Camera, Scan, Settings, ChevronDown, Eye, Palette, Volume2, Hand, Brain, Play, Accessibility, BookOpen, Type, Repeat, List
 } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
@@ -19,6 +19,7 @@ type ColorBlind = 'none' | 'protanopia' | 'deuteranopia' | 'tritanopia' | 'achro
 type HearingMode = 'normal' | 'mute';
 type MotorMode = 'normal' | 'singlehand';
 type CognitiveMode = 'normal' | 'dyslexia' | 'simplify';
+type ReaderSpeed = 'slow' | 'normal' | 'fast' | 'veryfast';
 
 function App() {
   // Detection
@@ -53,9 +54,11 @@ function App() {
   const lastAsrTextRef = useRef<string>('');
   const asrDebounceRef = useRef<number | null>(null);
 
-  // Screen Reader (reads Detectable Objects only)
+  // Screen Reader (Detectable Objects only)
   const [readerActive, setReaderActive] = useState(false);
-  const [readerRate, setReaderRate] = useState(1.0);
+  const [readerSpeed, setReaderSpeed] = useState<ReaderSpeed>('normal');
+  const [perItem, setPerItem] = useState<boolean>(true);  // item-by-item
+  const [loopRead, setLoopRead] = useState<boolean>(false); // loop
   const [readerQueue, setReaderQueue] = useState<string[]>([]);
   const currentIndexRef = useRef<number>(0);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -265,7 +268,7 @@ function App() {
         if (w.length <= 3) return w;
         const mid = w.slice(1, -1).split('');
         for (let i = mid.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
+        const j = Math.floor(Math.random() * (i + 1));
           [mid[i], mid[j]] = [mid[j], mid[i]];
         }
         return w[0] + mid.join('') + w[w.length - 1];
@@ -302,7 +305,7 @@ function App() {
     }
   }, [cognitive]);
 
-  // ---------- Screen Reader: Detectable Objects only ----------
+  // ---------- Screen Reader: Detectable Objects ----------
   useEffect(() => {
     const load = () => setVoices(speechSynthesis.getVoices());
     load();
@@ -314,6 +317,15 @@ function App() {
     };
   }, []);
 
+  function speedProfile(speed: ReaderSpeed) {
+    switch (speed) {
+      case 'slow':     return { rate: 0.9, pauseMs: 380 };
+      case 'normal':   return { rate: 1.0, pauseMs: 250 };
+      case 'fast':     return { rate: 1.2, pauseMs: 140 };
+      case 'veryfast': return { rate: 1.35, pauseMs: 80  };
+    }
+  }
+
   const pickVoice = useCallback(() => {
     if (!voices || voices.length === 0) return null;
     const pref = ['en-US', 'en_US', 'en-GB', 'en_GB'];
@@ -324,13 +336,28 @@ function App() {
     return voices[0] || null;
   }, [voices]);
 
-  const collectDetectablesText = useCallback(() => {
+  const collectDetectablesAsItems = useCallback(() => {
     const root = document.getElementById('det-objects');
     if (!root) return ['No detectable objects list found.'];
     const items = Array.from(root.querySelectorAll('[data-det-item]')) as HTMLElement[];
+    const title = (root.querySelector('[data-det-title]') as HTMLElement | null)?.innerText?.trim();
+    const list: string[] = [];
+    if (title) list.push(title);
+    for (const el of items) {
+      const name = el.innerText.replace(/\s+/g, ' ').trim();
+      if (name) list.push(name);
+    }
+    if (list.length === 0) return ['No items to read.'];
+    return list.slice(0, 200);
+  }, []);
+
+  const collectDetectablesAsChunks = useCallback(() => {
+    const root = document.getElementById('det-objects');
+    if (!root) return ['No detectable objects list found.'];
+    const title = (root.querySelector('[data-det-title]') as HTMLElement | null)?.innerText?.trim();
+    const items = Array.from(root.querySelectorAll('[data-det-item]')) as HTMLElement[];
     const lines: string[] = [];
-    const title = root.querySelector('[data-det-title]') as HTMLElement | null;
-    if (title) lines.push(title.innerText.replace(/\s+/g, ' ').trim());
+    if (title) lines.push(title);
     for (const el of items) {
       const name = el.innerText.replace(/\s+/g, ' ').trim();
       if (name) lines.push(name);
@@ -344,44 +371,59 @@ function App() {
       chunks.push(text.slice(i, end));
       i = end;
     }
-    return chunks.slice(0, 20);
+    return chunks.slice(0, 50);
   }, []);
 
   const speakFrom = useCallback((index: number, queue: string[]) => {
-    if (!readerActive || index < 0 || index >= queue.length) {
+    if (!readerActive || queue.length === 0) {
       setReaderActive(false);
       return;
     }
-    currentIndexRef.current = index;
+
+    let nextIndex = index;
+    if (index >= queue.length) {
+      if (loopRead) {
+        nextIndex = 0;
+      } else {
+        setReaderActive(false);
+        return;
+      }
+    }
+    currentIndexRef.current = nextIndex;
+
+    const { rate, pauseMs } = speedProfile(readerSpeed);
+
     try { speechSynthesis.cancel(); } catch {}
-    const u = new SpeechSynthesisUtterance(queue[index]);
+    const u = new SpeechSynthesisUtterance(queue[nextIndex]);
     const v = pickVoice();
     if (v) { u.voice = v; u.lang = v.lang || 'en-US'; } else { u.lang = 'en-US'; }
-    u.rate = readerRate;
+    u.rate = rate;
     u.onend = () => {
       if (!readerActive) return;
-      speakFrom(index + 1, queue);
+      setTimeout(() => speakFrom(nextIndex + 1, queue), pauseMs);
     };
     try { speechSynthesis.speak(u); } catch {}
-  }, [readerActive, readerRate, pickVoice]);
+  }, [readerActive, readerSpeed, loopRead, pickVoice]);
 
   const startReader = useCallback(() => {
-    const chunks = collectDetectablesText();
-    if (chunks.length === 0) return;
-    setReaderQueue(chunks);
+    const queue = perItem ? collectDetectablesAsItems() : collectDetectablesAsChunks();
+    if (queue.length === 0) return;
+    setReaderQueue(queue);
     setReaderActive(true);
+
+    const { rate, pauseMs } = speedProfile(readerSpeed);
     try { speechSynthesis.cancel(); } catch {}
-    const first = new SpeechSynthesisUtterance(chunks[0]);
+    const first = new SpeechSynthesisUtterance(queue[0]);
     const v = pickVoice();
     if (v) { first.voice = v; first.lang = v.lang || 'en-US'; } else { first.lang = 'en-US'; }
-    first.rate = readerRate;
+    first.rate = rate;
     first.onend = () => {
       if (!readerActive) return;
-      setTimeout(() => speakFrom(1, chunks), 0);
+      setTimeout(() => speakFrom(1, queue), pauseMs);
     };
     try { speechSynthesis.speak(first); } catch {}
     currentIndexRef.current = 0;
-  }, [collectDetectablesText, readerRate, pickVoice, speakFrom, readerActive]);
+  }, [perItem, readerSpeed, collectDetectablesAsItems, collectDetectablesAsChunks, pickVoice, speakFrom, readerActive]);
 
   const stopReader = useCallback(() => {
     setReaderActive(false);
@@ -389,12 +431,19 @@ function App() {
     try { speechSynthesis.cancel(); } catch {}
   }, []);
 
-  useEffect(() => {
-    if (!readerActive || readerQueue.length === 0) return;
-    const idx = currentIndexRef.current;
-    try { speechSynthesis.cancel(); } catch {}
-    setTimeout(() => speakFrom(idx, readerQueue), 0);
-  }, [readerRate, readerActive, readerQueue, speakFrom]);
+  // ---------- Elder preset toggle (on: apply; off: reset to defaults) ----------
+  const applyElderPreset = useCallback((on: boolean) => {
+    setElderMode(on);
+    if (on) {
+      setVisual('mild');
+      setCognitive('simplify');
+      setMotor('singlehand');
+    } else {
+      setVisual('none');
+      setCognitive('normal');
+      setMotor('normal');
+    }
+  }, []);
 
   // ---------- UI helpers ----------
   const iconLabel = (Icon: any, text: string) => (
@@ -403,15 +452,6 @@ function App() {
       <span>{text}</span>
     </span>
   );
-
-  const applyElderPreset = useCallback((on: boolean) => {
-    setElderMode(on);
-    if (on) {
-      setVisual(v => (v === 'none' ? 'mild' : v));
-      setCognitive(c => (c === 'normal' ? 'simplify' : c));
-      setMotor('singlehand');
-    }
-  }, []);
 
   const colorFilterStyleRoot: CSSProperties = colorFilterStyle;
 
@@ -505,27 +545,46 @@ function App() {
                   <span className="text-xs text-gray-400">ASR: English only</span>
                 </div>
 
-                <div className="flex flex-wrap gap-2 items-center">
-                  <span className="text-sm text-gray-300 w-44 inline-flex items-center gap-2"><BookOpen className="w-4 h-4" /> Screen Reader</span>
+                <div className="flex flex-wrap gap-3 items-center">
+                  <span className="text-sm text-gray-300 inline-flex items-center gap-2 w-44">
+                    <BookOpen className="w-4 h-4" /> Screen Reader
+                  </span>
                   <button
                     onClick={readerActive ? stopReader : startReader}
                     className={`px-3 py-1.5 rounded text-sm border ${readerActive?'bg-sky-600 text-white border-sky-500':'bg-gray-700/50 border-gray-600 hover:bg-gray-700'}`}
                   >
                     {readerActive ? 'Stop Reading' : 'Start Reading'}
                   </button>
-                  <label className="text-sm flex items-center gap-2">
+                  <label className="text-sm flex items-center gap-2" title="Reading Speed">
                     <Type className="w-4 h-4" />
                     <select
-                      value={readerRate}
-                      onChange={e=>setReaderRate(parseFloat(e.target.value))}
+                      value={readerSpeed}
+                      onChange={e=>setReaderSpeed(e.target.value as ReaderSpeed)}
                       className="px-2 py-1.5 rounded text-sm bg-gray-700 border border-gray-600"
                     >
-                      <option value={1.0}>1.0x</option>
-                      <option value={1.5}>1.5x</option>
-                      <option value={2.0}>2.0x</option>
-                      <option value={2.5}>2.5x</option>
-                      <option value={3.0}>3.0x</option>
+                      <option value="slow">Slow</option>
+                      <option value="normal">Normal</option>
+                      <option value="fast">Fast</option>
+                      <option value="veryfast">Very fast</option>
                     </select>
+                  </label>
+                  <label className="text-sm flex items-center gap-2" title="Read item by item">
+                    <List className="w-4 h-4" />
+                    <input
+                      type="checkbox"
+                      checked={perItem}
+                      onChange={e=>setPerItem(e.target.checked)}
+                    />
+                    <span>Per-item</span>
+                  </label>
+                  <label className="text-sm flex items-center gap-2" title="Loop reading">
+                    <Repeat className="w-4 h-4" />
+                    <input
+                      type="checkbox"
+                      checked={loopRead}
+                      onChange={e=>setLoopRead(e.target.checked)}
+                    />
+                    <span>Loop</span>
                   </label>
                 </div>
               </div>
