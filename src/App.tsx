@@ -56,6 +56,8 @@ function App() {
 
   // Screen Reader (Detectable Objects only)
   const [readerActive, setReaderActive] = useState(false);
+  const readerActiveRef = useRef(false);
+  useEffect(() => { readerActiveRef.current = readerActive; }, [readerActive]);
   const [readerSpeed, setReaderSpeed] = useState<ReaderSpeed>('normal');
   const [readerQueue, setReaderQueue] = useState<string[]>([]);
   const currentIndexRef = useRef<number>(0);
@@ -360,10 +362,13 @@ function App() {
   const speakFrom = useCallback((index: number, queue: string[]) => {
     if (!readerActive || queue.length === 0) {
       setReaderActive(false);
+      setReaderQueue([]);
       return;
     }
     if (index >= queue.length) {
+      readerActiveRef.current = false;
       setReaderActive(false); // auto switch button back to Start Reading
+      setReaderQueue([]);
       return;
     }
     currentIndexRef.current = index;
@@ -375,12 +380,20 @@ function App() {
     const v = pickVoice();
     if (v) { u.voice = v; u.lang = v.lang || 'en-US'; } else { u.lang = 'en-US'; }
     u.rate = rate;
+    
     u.onend = () => {
-      if (!readerActive) return;
-      setTimeout(() => speakFrom(index + 1, queue), pauseMs);
+      if (!readerActiveRef.current) return; 
+      const nextIndex = index + 1;
+      if (nextIndex >= queue.length) {
+        readerActiveRef.current = false;
+        setReaderActive(false);
+        setReaderQueue([]); 
+        return;
+      }
+      setTimeout(() => speakFrom(nextIndex, queue), pauseMs);
     };
-    try { speechSynthesis.speak(u); } catch {}
-  }, [readerActive, readerSpeed, pickVoice]);
+     try { speechSynthesis.speak(u); } catch {}
+}, [readerSpeed, pickVoice]);
 
   const startReader = useCallback(() => {
     const queue = collectDetectablesAsChunks();
@@ -403,6 +416,7 @@ function App() {
   }, [collectDetectablesAsChunks, readerSpeed, pickVoice, speakFrom, readerActive]);
 
   const stopReader = useCallback(() => {
+    readerActiveRef.current = false; 
     setReaderActive(false);
     setReaderQueue([]);
     try { speechSynthesis.cancel(); } catch {}
@@ -448,7 +462,7 @@ function App() {
             <div className="max-w-7xl mx-auto px-4 h-12 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Camera className="w-5 h-5" />
-                <span className="font-semibold">Accessibility Simulator</span>
+                <span className="font-semibold">[Insight to Impact] Accessibility Simulator</span>
               </div>
 
               <div className="flex items-center gap-2">
