@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, CSSProperties } from 'react';
 import Webcam from 'react-webcam';
 import {
-  Camera, Scan, Settings, ChevronDown, Eye, Palette, Volume2, Hand, Brain, Play, Accessibility, BookOpen, Type, Repeat, List
+  Camera, Scan, Settings, ChevronDown, Eye, Palette, Volume2, Hand, Brain, Play, Accessibility, BookOpen, Type
 } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
@@ -57,8 +57,6 @@ function App() {
   // Screen Reader (Detectable Objects only)
   const [readerActive, setReaderActive] = useState(false);
   const [readerSpeed, setReaderSpeed] = useState<ReaderSpeed>('normal');
-  const [perItem, setPerItem] = useState<boolean>(true);  // item-by-item
-  const [loopRead, setLoopRead] = useState<boolean>(false); // loop
   const [readerQueue, setReaderQueue] = useState<string[]>([]);
   const currentIndexRef = useRef<number>(0);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -268,7 +266,7 @@ function App() {
         if (w.length <= 3) return w;
         const mid = w.slice(1, -1).split('');
         for (let i = mid.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+          const j = Math.floor(Math.random() * (i + 1));
           [mid[i], mid[j]] = [mid[j], mid[i]];
         }
         return w[0] + mid.join('') + w[w.length - 1];
@@ -319,7 +317,7 @@ function App() {
 
   function speedProfile(speed: ReaderSpeed) {
     switch (speed) {
-      case 'slow':     return { rate: 0.9, pauseMs: 380 };
+      case 'slow':     return { rate: 0.8, pauseMs: 480 };
       case 'normal':   return { rate: 1.0, pauseMs: 250 };
       case 'fast':     return { rate: 1.2, pauseMs: 140 };
       case 'veryfast': return { rate: 1.35, pauseMs: 80  };
@@ -335,21 +333,6 @@ function App() {
     }
     return voices[0] || null;
   }, [voices]);
-
-  const collectDetectablesAsItems = useCallback(() => {
-    const root = document.getElementById('det-objects');
-    if (!root) return ['No detectable objects list found.'];
-    const items = Array.from(root.querySelectorAll('[data-det-item]')) as HTMLElement[];
-    const title = (root.querySelector('[data-det-title]') as HTMLElement | null)?.innerText?.trim();
-    const list: string[] = [];
-    if (title) list.push(title);
-    for (const el of items) {
-      const name = el.innerText.replace(/\s+/g, ' ').trim();
-      if (name) list.push(name);
-    }
-    if (list.length === 0) return ['No items to read.'];
-    return list.slice(0, 200);
-  }, []);
 
   const collectDetectablesAsChunks = useCallback(() => {
     const root = document.getElementById('det-objects');
@@ -379,34 +362,28 @@ function App() {
       setReaderActive(false);
       return;
     }
-
-    let nextIndex = index;
     if (index >= queue.length) {
-      if (loopRead) {
-        nextIndex = 0;
-      } else {
-        setReaderActive(false);
-        return;
-      }
+      setReaderActive(false); // auto switch button back to Start Reading
+      return;
     }
-    currentIndexRef.current = nextIndex;
+    currentIndexRef.current = index;
 
     const { rate, pauseMs } = speedProfile(readerSpeed);
 
     try { speechSynthesis.cancel(); } catch {}
-    const u = new SpeechSynthesisUtterance(queue[nextIndex]);
+    const u = new SpeechSynthesisUtterance(queue[index]);
     const v = pickVoice();
     if (v) { u.voice = v; u.lang = v.lang || 'en-US'; } else { u.lang = 'en-US'; }
     u.rate = rate;
     u.onend = () => {
       if (!readerActive) return;
-      setTimeout(() => speakFrom(nextIndex + 1, queue), pauseMs);
+      setTimeout(() => speakFrom(index + 1, queue), pauseMs);
     };
     try { speechSynthesis.speak(u); } catch {}
-  }, [readerActive, readerSpeed, loopRead, pickVoice]);
+  }, [readerActive, readerSpeed, pickVoice]);
 
   const startReader = useCallback(() => {
-    const queue = perItem ? collectDetectablesAsItems() : collectDetectablesAsChunks();
+    const queue = collectDetectablesAsChunks();
     if (queue.length === 0) return;
     setReaderQueue(queue);
     setReaderActive(true);
@@ -423,7 +400,7 @@ function App() {
     };
     try { speechSynthesis.speak(first); } catch {}
     currentIndexRef.current = 0;
-  }, [perItem, readerSpeed, collectDetectablesAsItems, collectDetectablesAsChunks, pickVoice, speakFrom, readerActive]);
+  }, [collectDetectablesAsChunks, readerSpeed, pickVoice, speakFrom, readerActive]);
 
   const stopReader = useCallback(() => {
     setReaderActive(false);
@@ -567,24 +544,6 @@ function App() {
                       <option value="fast">Fast</option>
                       <option value="veryfast">Very fast</option>
                     </select>
-                  </label>
-                  <label className="text-sm flex items-center gap-2" title="Read item by item">
-                    <List className="w-4 h-4" />
-                    <input
-                      type="checkbox"
-                      checked={perItem}
-                      onChange={e=>setPerItem(e.target.checked)}
-                    />
-                    <span>Per-item</span>
-                  </label>
-                  <label className="text-sm flex items-center gap-2" title="Loop reading">
-                    <Repeat className="w-4 h-4" />
-                    <input
-                      type="checkbox"
-                      checked={loopRead}
-                      onChange={e=>setLoopRead(e.target.checked)}
-                    />
-                    <span>Loop</span>
                   </label>
                 </div>
               </div>
