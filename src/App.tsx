@@ -53,7 +53,7 @@ function App() {
   const lastAsrTextRef = useRef<string>('');
   const asrDebounceRef = useRef<number | null>(null);
 
-  // Screen Reader (Sequence only, robust start)
+  // Screen Reader (reads Detectable Objects only)
   const [readerActive, setReaderActive] = useState(false);
   const [readerRate, setReaderRate] = useState(1.0);
   const [readerQueue, setReaderQueue] = useState<string[]>([]);
@@ -302,8 +302,7 @@ function App() {
     }
   }, [cognitive]);
 
-  // ---------- Screen Reader: Sequence only ----------
-  // Load voices early; but Start Reading 不依赖它（没有可用 voice 也用默认）
+  // ---------- Screen Reader: Detectable Objects only ----------
   useEffect(() => {
     const load = () => setVoices(speechSynthesis.getVoices());
     load();
@@ -325,55 +324,52 @@ function App() {
     return voices[0] || null;
   }, [voices]);
 
-  const collectReadableWholePage = useCallback(() => {
-    const root = document.body;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    const raw: string[] = [];
-    while (walker.nextNode()) {
-      const t = walker.currentNode as Text;
-      const s = (t.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!s) continue;
-      const p = t.parentElement;
-      if (!p) continue;
-      if (p.closest('script, style, code, pre, input, textarea, svg, canvas, video, [aria-hidden="true"]')) continue;
-      raw.push(s);
+  const collectDetectablesText = useCallback(() => {
+    const root = document.getElementById('det-objects');
+    if (!root) return ['No detectable objects list found.'];
+    const items = Array.from(root.querySelectorAll('[data-det-item]')) as HTMLElement[];
+    const lines: string[] = [];
+    const title = root.querySelector('[data-det-title]') as HTMLElement | null;
+    if (title) lines.push(title.innerText.replace(/\s+/g, ' ').trim());
+    for (const el of items) {
+      const name = el.innerText.replace(/\s+/g, ' ').trim();
+      if (name) lines.push(name);
     }
-    if (raw.length === 0) return ['Screen reader started. There is no readable text on screen.'];
-    const joined = raw.join(' ').replace(/\s{2,}/g, ' ').trim();
+    if (lines.length === 0) return ['No items to read.'];
+    const text = lines.join('. ');
     const chunks: string[] = [];
     let i = 0;
-    while (i < joined.length) {
-      const end = Math.min(i + 180, joined.length);
-      chunks.push(joined.slice(i, end));
+    while (i < text.length) {
+      const end = Math.min(i + 160, text.length);
+      chunks.push(text.slice(i, end));
       i = end;
     }
-    return chunks.slice(0, 80);
+    return chunks.slice(0, 20);
   }, []);
 
-  const speakFrom = useCallback((index: number) => {
-    if (!readerActive || index < 0 || index >= readerQueue.length) {
+  const speakFrom = useCallback((index: number, queue: string[]) => {
+    if (!readerActive || index < 0 || index >= queue.length) {
       setReaderActive(false);
       return;
     }
     currentIndexRef.current = index;
     try { speechSynthesis.cancel(); } catch {}
-    const u = new SpeechSynthesisUtterance(readerQueue[index]);
+    const u = new SpeechSynthesisUtterance(queue[index]);
     const v = pickVoice();
     if (v) { u.voice = v; u.lang = v.lang || 'en-US'; } else { u.lang = 'en-US'; }
     u.rate = readerRate;
     u.onend = () => {
       if (!readerActive) return;
-      speakFrom(index + 1);
+      speakFrom(index + 1, queue);
     };
     try { speechSynthesis.speak(u); } catch {}
-  }, [readerActive, readerQueue, readerRate, pickVoice]);
+  }, [readerActive, readerRate, pickVoice]);
 
   const startReader = useCallback(() => {
-    const chunks = collectReadableWholePage();
+    const chunks = collectDetectablesText();
     if (chunks.length === 0) return;
     setReaderQueue(chunks);
     setReaderActive(true);
-    // 立刻说第一段（用户手势内调用，规避浏览器自动播放限制）
     try { speechSynthesis.cancel(); } catch {}
     const first = new SpeechSynthesisUtterance(chunks[0]);
     const v = pickVoice();
@@ -381,11 +377,11 @@ function App() {
     first.rate = readerRate;
     first.onend = () => {
       if (!readerActive) return;
-      setTimeout(() => speakFrom(1), 0);
+      setTimeout(() => speakFrom(1, chunks), 0);
     };
     try { speechSynthesis.speak(first); } catch {}
     currentIndexRef.current = 0;
-  }, [collectReadableWholePage, readerRate, pickVoice, speakFrom, readerActive]);
+  }, [collectDetectablesText, readerRate, pickVoice, speakFrom, readerActive]);
 
   const stopReader = useCallback(() => {
     setReaderActive(false);
@@ -393,13 +389,12 @@ function App() {
     try { speechSynthesis.cancel(); } catch {}
   }, []);
 
-  // Rate change applies immediately: restart current utterance with same index
   useEffect(() => {
     if (!readerActive || readerQueue.length === 0) return;
     const idx = currentIndexRef.current;
     try { speechSynthesis.cancel(); } catch {}
-    setTimeout(() => speakFrom(idx), 0);
-  }, [readerRate, readerActive, readerQueue.length, speakFrom]);
+    setTimeout(() => speakFrom(idx, readerQueue), 0);
+  }, [readerRate, readerActive, readerQueue, speakFrom]);
 
   // ---------- UI helpers ----------
   const iconLabel = (Icon: any, text: string) => (
@@ -438,6 +433,7 @@ function App() {
                 <Camera className="w-5 h-5" />
                 <span className="font-semibold">Accessibility Simulator</span>
               </div>
+
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setIsDetectionActive(v => !v)}
@@ -461,12 +457,21 @@ function App() {
                 </button>
 
                 <button
+                  onClick={() => setMotor(m => (m === 'normal' ? 'singlehand' : 'normal'))}
+                  className={`px-3 py-1.5 rounded-md text-sm font-semibold flex items-center gap-2 ${motor === 'singlehand' ? 'bg-amber-600 hover:bg-amber-700' : 'bg-gray-700 hover:bg-gray-600'}`}
+                  title="Motor Mode"
+                >
+                  <Hand className="w-4 h-4" />
+                  <span>{motor === 'singlehand' ? 'Single-hand' : 'Motor: Normal'}</span>
+                </button>
+
+                <button
                   onClick={() => applyElderPreset(!elderMode)}
                   className={`px-3 py-1.5 rounded-md text-sm font-semibold flex items-center gap-2 ${elderMode ? 'bg-amber-600 hover:bg-amber-700' : 'bg-gray-700 hover:bg-gray-600'}`}
                   title="Elder Mode"
                 >
                   <Accessibility className="w-4 h-4" />
-                  <span>Elder Mode</span>
+                  <span>Elder</span>
                 </button>
               </div>
             </div>
@@ -529,11 +534,14 @@ function App() {
 
           <div className="max-w-7xl mx-auto cognitive-scope">
             <div className="grid lg:grid-cols-4 gap-6">
-              <div className="lg:col-span-1 bg-gray-800 p-6 rounded-xl h-[calc(100vh-12rem)] sticky top-20 overflow-y-auto hidden md:block">
+              <div
+                id="det-objects"
+                className="lg:col-span-1 bg-gray-800 p-6 rounded-xl h-[calc(100vh-12rem)] sticky top-20 overflow-y-auto hidden md:block"
+              >
                 <div className="space-y-2">
-                  <h2 className="text-xl font-semibold mb-2">Detectable Objects</h2>
+                  <h2 className="text-xl font-semibold mb-2" data-det-title>Detectable Objects</h2>
                   {indoorObjects.map((obj) => (
-                    <div key={obj} className="flex items-center space-x-2 p-2 rounded bg-gray-700/50">
+                    <div key={obj} className="flex items-center space-x-2 p-2 rounded bg-gray-700/50" data-det-item>
                       <div className="w-4 h-4 rounded-full" style={{ backgroundColor: getColorForClass(obj) }} />
                       <span className="capitalize">{obj}</span>
                     </div>
