@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, CSSProperties } from 'react';
 import Webcam from 'react-webcam';
-import { Camera, Scan, Settings, ChevronDown } from 'lucide-react';
+import { Camera, Scan, Settings, ChevronDown, Eye, Palette, Volume2, Hand, Brain, Play } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
 import ColorBlindSVGDefs from './components/ColorBlindSVGDefs';
@@ -21,9 +21,12 @@ type CognitiveMode = 'normal' | 'dyslexia' | 'simplify';
 function App() {
   const [isDetectionActive, setIsDetectionActive] = useState(false);
   const [model, setModel] = useState<cocoSsd.ObjectDetection | null>(null);
+  const modelLoadingRef = useRef(false);
+
   const [detectedObjects, setDetectedObjects] = useState<Array<{ class: string; score: number }>>([]);
   const previousObjectsRef = useRef<Set<string>>(new Set());
   const spokenOnceRef = useRef<Set<string>>(new Set());
+
   const webcamRef = useRef<Webcam | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationFrameRef = useRef<number>();
@@ -40,7 +43,15 @@ function App() {
 
   const [detCaptions, setDetCaptions] = useState<string[]>([]);
   const [hearingCaptions, setHearingCaptions] = useState<string[]>([]);
+  const [asrLang, setAsrLang] = useState<string>(navigator.language || 'en-US');
+
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [tabAudioStream, setTabAudioStream] = useState<MediaStream | null>(null);
+  const tabAudioCtxRef = useRef<AudioContext | null>(null);
+  const tabAudioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const tabWaveAnalyserRef = useRef<AnalyserNode | null>(null);
+  const tabWaveDataRef = useRef<Uint8Array | null>(null);
+  const tabWaveCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const recognitionRef = useRef<any>(null);
   const asrRestartRef = useRef(false);
@@ -59,13 +70,11 @@ function App() {
     const rec = new SR();
     rec.continuous = true;
     rec.interimResults = true;
-    rec.lang = navigator.language || 'en-US';
+    rec.lang = asrLang;
     rec.onresult = (e: any) => {
       let finalText = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) {
-          finalText += e.results[i][0].transcript;
-        }
+        if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
       }
       const clean = finalText.trim();
       if (!clean) return;
@@ -83,7 +92,7 @@ function App() {
     recognitionRef.current = rec;
     asrRestartRef.current = true;
     rec.start();
-  }, []);
+  }, [asrLang]);
 
   useEffect(() => {
     if (hearing === 'normal') {
@@ -108,31 +117,30 @@ function App() {
     if (hearing !== 'mute') {
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
-      u.lang = navigator.language || 'en-US';
+      u.lang = asrLang;
       speechSynthesis.speak(u);
     }
     setDetCaptions(prev => [text, ...prev].slice(0, 6));
-  }, [hearing]);
+  }, [hearing, asrLang]);
 
   useEffect(() => {
-    return () => {
-      stopDetection();
-    };
+    return () => stopDetection();
   }, []);
 
-  useEffect(() => {
-    const initTF = async () => {
-      try {
-        await tf.ready();
-        await tf.setBackend('webgl');
-        const loadedModel = await cocoSsd.load({ base: 'mobilenet_v2' });
-        setModel(loadedModel);
-      } catch (error) {
-        console.error('TF init/model error:', error);
-      }
-    };
-    initTF();
-  }, []);
+  const ensureModel = useCallback(async () => {
+    if (model || modelLoadingRef.current) return;
+    modelLoadingRef.current = true;
+    try {
+      await tf.ready();
+      await tf.setBackend('webgl');
+      const loadedModel = await cocoSsd.load({ base: 'mobilenet_v2' });
+      setModel(loadedModel);
+    } catch (e) {
+      console.error('Model load error:', e);
+    } finally {
+      modelLoadingRef.current = false;
+    }
+  }, [model]);
 
   const colorMap: { [key: string]: string } = {
     person: '#0072B2',
@@ -189,9 +197,7 @@ function App() {
 
       const present = new Set(predictions.map(p => p.class));
       const newOnes: string[] = [];
-      present.forEach(c => {
-        if (!previousObjectsRef.current.has(c)) newOnes.push(c);
-      });
+      present.forEach(c => { if (!previousObjectsRef.current.has(c)) newOnes.push(c); });
 
       setDetectedObjects(predictions.map(p => ({ class: p.class, score: p.score })));
 
@@ -201,11 +207,8 @@ function App() {
       });
 
       const gone: string[] = [];
-      previousObjectsRef.current.forEach(c => {
-        if (!present.has(c)) gone.push(c);
-      });
+      previousObjectsRef.current.forEach(c => { if (!present.has(c)) gone.push(c); });
       gone.forEach(c => spokenOnceRef.current.delete(c));
-
       previousObjectsRef.current = present;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -239,11 +242,15 @@ function App() {
   useEffect(() => {
     if (isDetectionActive) {
       isDetectionRunningRef.current = true;
-      detectObjects();
+      if (!model) {
+        ensureModel().then(() => requestAnimationFrame(detectObjects));
+      } else {
+        requestAnimationFrame(detectObjects);
+      }
     } else {
       stopDetection();
     }
-  }, [isDetectionActive, detectObjects, stopDetection]);
+  }, [isDetectionActive, detectObjects, stopDetection, ensureModel, model]);
 
   const handleUserMedia = useCallback(() => {
     setIsCameraReady(true);
@@ -273,20 +280,6 @@ function App() {
   const colorFilterStyle: CSSProperties = colorFilterId
     ? { filter: `url(${colorFilterId})`, WebkitFilter: `url(${colorFilterId})` }
     : {};
-
-  const longPress = (fn: () => void, ms = 600) => {
-    let t: number | undefined;
-    return {
-      onMouseDown: (e: React.MouseEvent) => {
-        if (motor !== 'singlehand') { fn(); return; }
-        const el = (e.currentTarget as HTMLElement);
-        el.dataset.press = 'on';
-        t = window.setTimeout(() => { fn(); el.dataset.press = ''; }, ms);
-      },
-      onMouseUp: (e: React.MouseEvent) => { if (t) { clearTimeout(t); t = undefined; (e.currentTarget as HTMLElement).dataset.press = ''; } },
-      onMouseLeave: (e: React.MouseEvent) => { if (t) { clearTimeout(t); t = undefined; (e.currentTarget as HTMLElement).dataset.press = ''; } },
-    };
-  };
 
   const originalTextMapRef = useRef<WeakMap<Text, string>>(new WeakMap());
 
@@ -338,10 +331,73 @@ function App() {
     }
   }, [cognitive]);
 
+  const startTabAudioCapture = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: false });
+      setTabAudioStream(stream);
+      if (!tabAudioCtxRef.current) tabAudioCtxRef.current = new AudioContext();
+      const ctx = tabAudioCtxRef.current;
+      tabAudioSourceRef.current?.disconnect();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      source.connect(analyser);
+      tabAudioSourceRef.current = source;
+      tabWaveAnalyserRef.current = analyser;
+      tabWaveDataRef.current = data;
+    } catch (e) {
+      console.warn('Tab audio capture failed or blocked.', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    let raf: number | null = null;
+    const draw = () => {
+      const cvs = tabWaveCanvasRef.current;
+      const analyser = tabWaveAnalyserRef.current;
+      const data = tabWaveDataRef.current;
+      if (!cvs || !analyser || !data) {
+        raf = requestAnimationFrame(draw);
+        return;
+      }
+      const ctx = cvs.getContext('2d');
+      if (!ctx) {
+        raf = requestAnimationFrame(draw);
+        return;
+      }
+      ctx.clearRect(0,0,cvs.width,cvs.height);
+      analyser.getByteTimeDomainData(data);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#4ADE80';
+      ctx.beginPath();
+      const slice = cvs.width / data.length;
+      for (let i=0; i<data.length; i++){
+        const v = data[i] / 128.0;
+        const y = v * cvs.height/2;
+        if (i===0) ctx.moveTo(0, y);
+        else ctx.lineTo(i*slice, y);
+      }
+      ctx.stroke();
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => { if (raf) cancelAnimationFrame(raf); };
+  }, []);
+
+  const iconLabel = (Icon: any, text: string) => (
+    <span className="inline-flex items-center gap-1">
+      <Icon className="w-4 h-4 opacity-80" />
+      <span>{text}</span>
+    </span>
+  );
+
+  const colorFilterStyleRoot: CSSProperties = colorFilterStyle;
+
   return (
     <>
       <ColorBlindSVGDefs />
-      <div className={`min-h-screen bg-gray-900 text-white ${motor === 'singlehand' ? 'motor-singlehand' : ''} ${cognitive === 'simplify' ? 'cog-simplify' : ''}`} style={colorFilterStyle}>
+      <div className={`min-h-screen bg-gray-900 text-white ${motor === 'singlehand' ? 'motor-singlehand' : ''} ${cognitive === 'simplify' ? 'cog-simplify' : ''}`} style={colorFilterStyleRoot}>
         <header className="fixed top-0 left-0 right-0 z-50">
           <div className="bg-gray-900/85 backdrop-blur border-b border-white/10">
             <div className="max-w-7xl mx-auto px-4 h-12 flex items-center justify-between">
@@ -351,9 +407,10 @@ function App() {
               </div>
               <div className="flex items-center gap-2">
                 <button
-                  {...longPress(() => setIsDetectionActive(!isDetectionActive))}
-                  className={`dwell px-3 py-1.5 rounded-md text-sm font-medium transition ${isDetectionActive ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-700 hover:bg-gray-600'}`}
-                  disabled={!model}
+                  onClick={() => setIsDetectionActive(v => !v)}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition ${isDetectionActive ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-700 hover:bg-gray-600'}`}
+                  disabled={modelLoadingRef.current}
+                  title={model ? 'Start/Stop Detection' : 'Model loads on first Start'}
                 >
                   <div className="flex items-center gap-2">
                     <Scan className="w-4 h-4" />
@@ -378,35 +435,61 @@ function App() {
             <div className="mb-4 bg-gray-800/95 rounded-xl p-4 space-y-4">
               <div className="grid md:grid-cols-2 gap-3">
                 <div className="flex flex-wrap gap-2 items-center">
-                  <span className="text-sm text-gray-300 w-20">Visual</span>
+                  <span className="text-sm text-gray-300 w-28">{iconLabel(Eye, 'Visual')}</span>
                   {(['none','mild','moderate','severe','central','peripheral'] as VisualLevel[]).map(v=>(
                     <button key={v} onClick={()=>setVisual(v)} className={`px-3 py-1.5 rounded text-sm border ${visual===v?'bg-blue-600 text-white border-blue-500':'bg-gray-700/50 border-gray-600 hover:bg-gray-700'}`}>{v}</button>
                   ))}
                 </div>
                 <div className="flex flex-wrap gap-2 items-center">
-                  <span className="text-sm text-gray-300 w-28">Color Blind</span>
+                  <span className="text-sm text-gray-300 w-40">{iconLabel(Palette, 'Color Blind')}</span>
                   {(['none','protanopia','deuteranopia','tritanopia','achroma'] as ColorBlind[]).map(c=>(
                     <button key={c} onClick={()=>setColorBlind(c)} className={`px-3 py-1.5 rounded text-sm border ${colorBlind===c?'bg-purple-600 text-white border-purple-500':'bg-gray-700/50 border-gray-600 hover:bg-gray-700'}`}>{c}</button>
                   ))}
                 </div>
               </div>
+
               <div className="grid md:grid-cols-2 gap-3">
                 <div className="flex flex-wrap gap-2 items-center">
-                  <span className="text-sm text-gray-300 w-20">Hearing</span>
+                  <span className="text-sm text-gray-300 w-28">{iconLabel(Volume2, 'Hearing')}</span>
                   {(['normal','mute'] as HearingMode[]).map(h=>(
                     <button key={h} onClick={()=>setHearing(h)} className={`px-3 py-1.5 rounded text-sm border ${hearing===h?'bg-emerald-600 text-white border-emerald-500':'bg-gray-700/50 border-gray-600 hover:bg-gray-700'}`}>{h}</button>
                   ))}
+                  <select
+                    value={asrLang}
+                    onChange={e=>setAsrLang(e.target.value)}
+                    className="px-2 py-1.5 rounded text-sm bg-gray-700 border border-gray-600"
+                    title="ASR language"
+                  >
+                    <option value="en-US">English (US)</option>
+                    <option value="en-GB">English (UK)</option>
+                    <option value="zh-CN">中文（简体）</option>
+                    <option value="zh-TW">中文（繁体）</option>
+                    <option value="ja-JP">日本語</option>
+                    <option value="ko-KR">한국어</option>
+                    <option value="de-DE">Deutsch</option>
+                    <option value="fr-FR">Français</option>
+                    <option value="es-ES">Español</option>
+                  </select>
+                  <button
+                    onClick={startTabAudioCapture}
+                    className="px-3 py-1.5 rounded text-sm bg-gray-700 hover:bg-gray-600 border border-gray-600"
+                    title="Experimental: capture tab audio waveform"
+                  >
+                    Capture Tab Audio
+                  </button>
                 </div>
+
                 <div className="flex flex-wrap gap-2 items-center">
-                  <span className="text-sm text-gray-300 w-28">Motor</span>
+                  <span className="text-sm text-gray-300 w-28">{iconLabel(Hand, 'Motor')}</span>
                   {(['normal','singlehand'] as MotorMode[]).map(m=>(
                     <button key={m} onClick={()=>setMotor(m)} className={`px-3 py-1.5 rounded text-sm border ${motor===m?'bg-amber-600 text-white border-amber-500':'bg-gray-700/50 border-gray-600 hover:bg-gray-700'}`}>{m}</button>
                   ))}
-                  <span className="text-xs text-gray-400 ml-2">Long-press to trigger in single-hand</span>
+                  <span className="text-xs text-gray-400 ml-2">Thumb Bar on</span>
                 </div>
               </div>
+
               <div className="flex flex-wrap gap-2 items-center">
-                <span className="text-sm text-gray-300 w-20">Cognitive</span>
+                <span className="text-sm text-gray-300 w-28">{iconLabel(Brain, 'Cognitive')}</span>
                 {(['normal','dyslexia','simplify'] as CognitiveMode[]).map(c=>(
                   <button key={c} onClick={()=>setCognitive(c)} className={`px-3 py-1.5 rounded text-sm border ${cognitive===c?'bg-pink-600 text-white border-pink-500':'bg-gray-700/50 border-gray-600 hover:bg-gray-700'}`}>{c}</button>
                 ))}
@@ -431,12 +514,11 @@ function App() {
                 </div>
 
                 <div className="mt-6 bg-gray-800 p-4 rounded-xl space-y-3">
-                  <h3 className="font-semibold">Hearing Simulation</h3>
-                  <div className="bg-gray-700/50 p-3 rounded-lg flex items-center gap-3">
-                    <span className="text-sm text-gray-300">Sample Audio</span>
-                    <audio ref={audioRef} src="/audio/sample.mp3" controls className="w-full" />
+                  <h3 className="font-semibold">System Audio (Experimental)</h3>
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <canvas ref={tabWaveCanvasRef} width={320} height={64} className="w-full h-16" />
                   </div>
-                  <p className="text-xs text-gray-400">Live captions appear when hearing is mute.</p>
+                  <p className="text-xs text-gray-400">Web Speech can recognize mic only. For true tab-audio captions, integrate a WASM ASR.</p>
                 </div>
               </div>
 
@@ -462,9 +544,9 @@ function App() {
                       <p className="text-lg">Please allow camera access...</p>
                     </div>
                   )}
-                  {!model && isCameraReady && (
+                  {!model && isDetectionActive && isCameraReady && (
                     <div className="absolute inset-0 flex items-center justify-center bg-gray-800/50">
-                      <p className="text-lg">Loading object detection model...</p>
+                      <p className="text-lg">Loading detection model...</p>
                     </div>
                   )}
 
@@ -499,6 +581,34 @@ function App() {
             </div>
           </div>
         </main>
+
+        {motor === 'singlehand' && (
+          <div className="fixed bottom-0 left-0 right-0 z-40 bg-gray-900/90 backdrop-blur border-t border-white/10 md:hidden">
+            <div className="max-w-7xl mx-auto px-4 py-3 grid grid-cols-3 gap-3">
+              <button
+                onClick={() => setIsDetectionActive(v => !v)}
+                className={`w-full inline-flex items-center justify-center gap-2 py-3 rounded-lg text-base font-semibold ${isDetectionActive ? 'bg-blue-600' : 'bg-gray-700'} active:scale-95`}
+              >
+                <Play className="w-5 h-5" />
+                <span>{isDetectionActive ? 'Stop' : 'Start'}</span>
+              </button>
+              <button
+                onClick={() => setControlsOpen(true)}
+                className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-lg text-base font-semibold bg-gray-700 active:scale-95"
+              >
+                <Settings className="w-5 h-5" />
+                <span>Modes</span>
+              </button>
+              <button
+                onClick={() => setColorBlind(prev => prev === 'none' ? 'deuteranopia' : 'none')}
+                className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-lg text-base font-semibold bg-gray-700 active:scale-95"
+              >
+                <Palette className="w-5 h-5" />
+                <span>Color</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </>
   );
