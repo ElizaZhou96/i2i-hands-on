@@ -46,7 +46,6 @@ function App() {
 
   const [detCaptions, setDetCaptions] = useState<string[]>([]);
   const [hearingCaptions, setHearingCaptions] = useState<string[]>([]);
-  const [asrLang, setAsrLang] = useState<string>(navigator.language || 'en-US');
 
   const recognitionRef = useRef<any>(null);
   const asrRestartRef = useRef(false);
@@ -67,20 +66,22 @@ function App() {
     const rec = new SR();
     rec.continuous = true;
     rec.interimResults = true;
-    rec.lang = asrLang;
+    rec.lang = 'en-US';
     rec.onresult = (e: any) => {
       let finalText = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
         if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
       }
-      const clean = finalText.trim();
+      let clean = finalText.trim();
+      if (!clean) return;
+      clean = clean.replace(/[^A-Za-z0-9 .,!?']/g, ''); // English-only
       if (!clean) return;
       if (clean === lastAsrTextRef.current) return;
       lastAsrTextRef.current = clean;
       if (asrDebounceRef.current) window.clearTimeout(asrDebounceRef.current);
       asrDebounceRef.current = window.setTimeout(() => {
         setHearingCaptions(prev => [clean, ...prev].slice(0, 6));
-      }, 120);
+      }, 100);
     };
     rec.onend = () => {
       recognitionRef.current = null;
@@ -89,7 +90,7 @@ function App() {
     recognitionRef.current = rec;
     asrRestartRef.current = true;
     rec.start();
-  }, [asrLang]);
+  }, []);
 
   useEffect(() => {
     if (hearing === 'normal') {
@@ -110,24 +111,15 @@ function App() {
     };
   }, [hearing, startASR]);
 
-  useEffect(() => {
-    if (hearing !== 'normal') {
-      asrRestartRef.current = false;
-      recognitionRef.current?.stop();
-      recognitionRef.current = null;
-      startASR();
-    }
-  }, [asrLang, hearing, startASR]);
-
   const speak = useCallback((text: string) => {
     if (hearing !== 'mute') {
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
-      u.lang = asrLang;
+      u.lang = 'en-US';
       speechSynthesis.speak(u);
     }
     setDetCaptions(prev => [text, ...prev].slice(0, 6));
-  }, [hearing, asrLang]);
+  }, [hearing]);
 
   const ensureModel = useCallback(async () => {
     if (model || modelLoadingRef.current) return;
@@ -398,13 +390,13 @@ function App() {
     const text = readerQueue[0];
     const u = new SpeechSynthesisUtterance(text);
     u.rate = readerRate;
-    u.lang = asrLang;
+    u.lang = 'en-US';
     u.onend = () => {
       setReaderQueue(q => q.slice(1));
     };
     readerUtterRef.current = u;
     speechSynthesis.speak(u);
-  }, [readerActive, readerQueue, readerRate, asrLang]);
+  }, [readerActive, readerQueue, readerRate]);
 
   const stopReader = useCallback(() => {
     setReaderActive(false);
@@ -491,22 +483,7 @@ function App() {
                   {(['normal','mute'] as HearingMode[]).map(h=>(
                     <button key={h} onClick={()=>setHearing(h)} className={`px-3 py-1.5 rounded text-sm border ${hearing===h?'bg-emerald-600 text-white border-emerald-500':'bg-gray-700/50 border-gray-600 hover:bg-gray-700'}`}>{h}</button>
                   ))}
-                  <select
-                    value={asrLang}
-                    onChange={e=>setAsrLang(e.target.value)}
-                    className="px-2 py-1.5 rounded text-sm bg-gray-700 border border-gray-600"
-                    title="ASR language"
-                  >
-                    <option value="en-US">English (US)</option>
-                    <option value="en-GB">English (UK)</option>
-                    <option value="zh-CN">中文（简体）</option>
-                    <option value="zh-TW">中文（繁体）</option>
-                    <option value="ja-JP">日本語</option>
-                    <option value="ko-KR">한국어</option>
-                    <option value="de-DE">Deutsch</option>
-                    <option value="fr-FR">Français</option>
-                    <option value="es-ES">Español</option>
-                  </select>
+                  <span className="text-xs text-gray-400">ASR: English only</span>
                 </div>
 
                 <div className="flex flex-wrap gap-2 items-center">
