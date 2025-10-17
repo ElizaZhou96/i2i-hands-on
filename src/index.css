@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+/* === Visual impairment levels === */
+.vis-mild       { filter: blur(2px) contrast(0.9) brightness(1.05); }
+.vis-moderate   { filter: blur(5px) contrast(0.75) brightness(1.1); }
+.vis-severe     { filter: blur(12px) contrast(0.6) brightness(1.2); }
+
+/* Central scotoma*/
+.vis-central {
+  position: relative;
+}
+.vis-central::after{
+  content:"";
+  position:absolute; inset:0;
+  pointer-events:none;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(0,0,0,0.9) 0 120px, rgba(0,0,0,0) 140px);
+  mix-blend-mode:multiply;
+}
+
+/* Peripheral loss (隧道视野) */
+.vis-peripheral {
+  position: relative;
+  filter: blur(2px) contrast(0.85);
+}
+.vis-peripheral::after{
+  content:"";
+  position:absolute; inset:0;
+  pointer-events:none;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0 120px, rgba(0,0,0,0.95) 180px);
+}
+
+/* === Color blindness filters via SVG ids === */
+.cb-protanopia   { filter: url(#cb-protanopia); }
+.cb-deuteranopia { filter: url(#cb-deuteranopia); }
+.cb-tritanopia   { filter: url(#cb-tritanopia); }
+.cb-achroma      { filter: url(#cb-achroma); }
+
+/* === Motor (single-hand): bigger targets + dwell-click styling === */
+.motor-singlehand button,
+.motor-singlehand [role="button"]{
+  min-height: 44px;
+  min-width: 44px;
+  padding: .8rem 1.1rem;
+  border-radius: .75rem;
+}
+
+/* Dwell progress ring for long-press */
+.dwell {
+  position: relative;
+}
+.dwell::after{
+  content:"";
+  position:absolute; inset:0;
+  border-radius: inherit;
+  border: 2px solid rgba(255,255,255,.35);
+  transform: scale(0.96);
+  opacity:0; transition: opacity .2s;
+}
+.dwell[data-press="on"]::after{ opacity:1; }
+
+/* === Cognitive: dyslexia-like scramble helper === */
+.cognitive-scope { }
+
+.cog-simplify p { line-height: 1.9; }
+.cog-simplify .text-gray-600,
+.cog-simplify .text-gray-500 { color: #ccc; }
+.cog-simplify h1, .cog-simplify h2, .cog-simplify h3 { font-weight: 800; }
