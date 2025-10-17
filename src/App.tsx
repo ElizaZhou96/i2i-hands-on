@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import Webcam from 'react-webcam';
-import { Camera, Scan } from 'lucide-react';
+import { Camera, Scan, Settings, ChevronDown } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
 import AccessibilityPanel, {
@@ -8,6 +8,13 @@ import AccessibilityPanel, {
 } from './components/AccessibilityPanel';
 import ColorBlindSVGDefs from './components/ColorBlindSVGDefs';
 import useAudioFilter from './hooks/useAudioFilter';
+
+declare global {
+  interface Window {
+    webkitSpeechRecognition?: any;
+    SpeechRecognition?: any;
+  }
+}
 
 function App() {
   const [isDetectionActive, setIsDetectionActive] = useState(false);
@@ -27,7 +34,6 @@ function App() {
   const [cognitive, setCognitive] = useState<CognitiveMode>('normal');
 
   const [captions, setCaptions] = useState<string[]>([]);
-
   const audioRef = useRef<HTMLAudioElement | null>(null);
   useAudioFilter(audioRef.current, hearing === 'lowpass' ? 'lowpass' : hearing === 'highpass' ? 'highpass' : 'none');
 
@@ -35,6 +41,9 @@ function App() {
   const micCtxRef = useRef<AudioContext | null>(null);
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const micFilterRef = useRef<BiquadFilterNode | null>(null);
+  const micGainRef = useRef<GainNode | null>(null);
+
+  const [controlsOpen, setControlsOpen] = useState(false);
 
   const ensureMic = useCallback(async () => {
     if (micStream) return micStream;
@@ -43,29 +52,55 @@ function App() {
     return stream;
   }, [micStream]);
 
-  const wireMicGraph = useCallback((type: HearingMode) => {
+  const wireMicGraph = useCallback((mode: HearingMode) => {
     if (!micStream) return;
     if (!micCtxRef.current) micCtxRef.current = new AudioContext();
     const ctx = micCtxRef.current;
 
     if (micSourceRef.current) micSourceRef.current.disconnect();
     if (micFilterRef.current) micFilterRef.current.disconnect();
+    if (micGainRef.current) micGainRef.current.disconnect();
 
-    micSourceRef.current = ctx.createMediaStreamSource(micStream);
-    micFilterRef.current = ctx.createBiquadFilter();
+    const source = ctx.createMediaStreamSource(micStream);
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
 
-    if (type === 'lowpass') {
-      micFilterRef.current.type = 'lowpass';
-      micFilterRef.current.frequency.value = 1200;
-    } else if (type === 'highpass') {
-      micFilterRef.current.type = 'highpass';
-      micFilterRef.current.frequency.value = 1200;
+    if (mode === 'lowpass') {
+      filter.type = 'lowpass';
+      filter.frequency.value = 1200;
+      gain.gain.value = 1.0;
+      source.connect(filter).connect(gain).connect(ctx.destination);
+    } else if (mode === 'highpass') {
+      filter.type = 'highpass';
+      filter.frequency.value = 1200;
+      gain.gain.value = 1.0;
+      source.connect(filter).connect(gain).connect(ctx.destination);
+    } else if (mode === 'mute') {
+      filter.type = 'allpass';
+      gain.gain.value = 0.0;
+      source.connect(filter).connect(gain).connect(ctx.destination);
     } else {
-      micFilterRef.current.type = 'allpass';
+      filter.type = 'allpass';
+      gain.gain.value = 0.0;
+      source.connect(filter).connect(gain).disconnect();
     }
 
-    micSourceRef.current.connect(micFilterRef.current).connect(ctx.destination);
+    micSourceRef.current = source;
+    micFilterRef.current = filter;
+    micGainRef.current = gain;
   }, [micStream]);
+
+  const recognitionRef = useRef<any>(null);
+  const [asrActive, setAsrActive] = useState(false);
+
+  useEffect(() => {
+    if (!audioRef.current) return;
+    if (hearing === 'normal') {
+      audioRef.current.muted = false;
+    } else {
+      audioRef.current.muted = true;
+    }
+  }, [hearing]);
 
   useEffect(() => {
     (async () => {
@@ -80,13 +115,54 @@ function App() {
       } else {
         if (micSourceRef.current) micSourceRef.current.disconnect();
         if (micFilterRef.current) micFilterRef.current.disconnect();
+        if (micGainRef.current) micGainRef.current.disconnect();
       }
     })();
   }, [hearing, ensureMic, wireMicGraph]);
 
+  const startASR = useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    if (recognitionRef.current) return;
+    const rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = 'en-US';
+    rec.onresult = (e: any) => {
+      let s = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        s += e.results[i][0].transcript;
+      }
+      if (s.trim().length > 0) {
+        setCaptions((prev) => [s.trim(), ...prev].slice(0, 8));
+      }
+    };
+    rec.onend = () => {
+      recognitionRef.current = null;
+      if (asrActive) startASR();
+    };
+    recognitionRef.current = rec;
+    rec.start();
+  }, [asrActive]);
+
+  useEffect(() => {
+    if (hearing === 'normal') {
+      setAsrActive(false);
+      recognitionRef.current?.stop();
+      recognitionRef.current = null;
+      return;
+    }
+    setAsrActive(true);
+    startASR();
+    return () => {
+      recognitionRef.current?.stop();
+      recognitionRef.current = null;
+    };
+  }, [hearing, startASR]);
+
   const speak = useCallback((text: string) => {
     if (isDetectionActive && isDetectionRunningRef.current) {
-      setCaptions((prev) => [text, ...prev].slice(0, 5));
+      setCaptions((prev) => [text, ...prev].slice(0, 8));
       if (hearing !== 'mute') {
         const utterance = new SpeechSynthesisUtterance(text);
         speechSynthesis.speak(utterance);
@@ -116,22 +192,23 @@ function App() {
 
   const colorMap: { [key: string]: string } = {
     person: '#0072B2',
-    car: '#E69F00',
-    bicycle: '#009E73',
-    chair: '#56B4E9',
-    couch: '#CC79A7',
-    tv: '#D55E00',
-    laptop: '#F0E442',
-    'cell phone': '#0072B2',
     book: '#56B4E9',
-    clock: '#5AC8FA',
-    'traffic light': '#009E73',
-    'stop sign': '#D55E00',
+    'cell phone': '#009E73',
+    laptop: '#E69F00',
+    tv: '#CC79A7',
+    bottle: '#F0E442',
+    chair: '#8A4FAA',
+    cup: '#5AC8FA',
+    keyboard: '#D55E00',
+    mouse: '#8E8E93',
+    remote: '#9C27B0',
+    backpack: '#795548',
     default: '#8E8E93'
   };
 
-  const commonObjects = [
-    'person', 'car', 'bicycle', 'chair', 'couch', 'tv', 'laptop', 'cell phone', 'book', 'clock', 'traffic light', 'stop sign'
+  const indoorObjects = [
+    'person', 'book', 'cell phone', 'laptop', 'tv', 'bottle',
+    'chair', 'cup', 'keyboard', 'mouse', 'remote', 'backpack'
   ];
 
   const getColorForClass = (className: string) => colorMap[className] || colorMap.default;
@@ -243,110 +320,133 @@ function App() {
     };
   };
 
+  const originalTextMapRef = useRef<WeakMap<Text, string>>(new WeakMap());
+
   useEffect(() => {
-    if (!document.querySelector('.cognitive-scope')) return;
-    if (cognitive !== 'dyslexia') return;
+    const root = document.querySelector('.cognitive-scope');
+    if (!root) return;
 
-    function scrambleWord(w: string) {
-      if (w.length <= 3) return w;
-      const mid = w.slice(1, -1).split('');
-      for (let i = mid.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [mid[i], mid[j]] = [mid[j], mid[i]];
+    if (cognitive === 'dyslexia') {
+      function scrambleWord(w: string) {
+        if (w.length <= 3) return w;
+        const mid = w.slice(1, -1).split('');
+        for (let i = mid.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [mid[i], mid[j]] = [mid[j], mid[i]];
+        }
+        return w[0] + mid.join('') + w[w.length - 1];
       }
-      return w[0] + mid.join('') + w[w.length - 1];
-    }
-    function scrambleTextNode(node: Text) {
-      const orig = node.textContent ?? '';
-      const scrambled = orig.replace(/[A-Za-zÀ-ÿ]{4,}/g, scrambleWord);
-      if (scrambled !== orig) node.textContent = scrambled;
-    }
-
-    const root = document.querySelector('.cognitive-scope')!;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        const p = (node as Text).parentElement;
-        if (!p) return NodeFilter.FILTER_REJECT;
-        if (p.closest('button, .no-scramble, code, pre, input, textarea, svg')) return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
+      function scrambleTextNode(node: Text) {
+        const orig = node.textContent ?? '';
+        if (!originalTextMapRef.current.get(node)) {
+          originalTextMapRef.current.set(node, orig);
+        }
+        const scrambled = orig.replace(/[A-Za-zÀ-ÿ]{4,}/g, scrambleWord);
+        if (scrambled !== orig) node.textContent = scrambled;
       }
-    } as unknown as NodeFilter);
-    const targets: Text[] = [];
-    while (walker.nextNode()) targets.push(walker.currentNode as Text);
-    targets.forEach(scrambleTextNode);
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+          const p = (n as Text).parentElement;
+          if (!p) return NodeFilter.FILTER_REJECT;
+          if (p.closest('button, .no-scramble, code, pre, input, textarea, svg')) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      } as unknown as NodeFilter);
+      const targets: Text[] = [];
+      while (walker.nextNode()) targets.push(walker.currentNode as Text);
+      targets.forEach(scrambleTextNode);
+    } else {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const toRestore: Text[] = [];
+      while (walker.nextNode()) {
+        const t = walker.currentNode as Text;
+        const orig = originalTextMapRef.current.get(t);
+        if (orig !== undefined && t.textContent !== orig) toRestore.push(t);
+      }
+      toRestore.forEach((t) => {
+        const orig = originalTextMapRef.current.get(t);
+        if (orig !== undefined) t.textContent = orig;
+      });
+    }
   }, [cognitive]);
 
   return (
     <>
       <ColorBlindSVGDefs />
       <div className={`min-h-screen bg-gray-900 text-white ${colorClass} ${motor === 'singlehand' ? 'motor-singlehand' : ''} ${cognitive === 'simplify' ? 'cog-simplify' : ''}`}>
-        <header className="bg-gray-800 p-4 sticky top-0 z-50 shadow-lg">
-          <div className="container mx-auto">
-            <div className="flex items-center justify-between flex-wrap gap-4">
-              <div className="flex items-center space-x-2">
-                <Camera className="w-6 h-6" />
-                <h1 className="text-xl font-bold">Accessibility Simulator</h1>
+        <header className="fixed top-0 left-0 right-0 z-50">
+          <div className="bg-gray-900/85 backdrop-blur border-b border-white/10">
+            <div className="max-w-7xl mx-auto px-4 h-12 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Camera className="w-5 h-5" />
+                <span className="font-semibold">Accessibility Simulator</span>
               </div>
-              <div className="flex items-center space-x-4 flex-wrap gap-2">
+              <div className="flex items-center gap-2">
                 <button
                   {...longPress(() => setIsDetectionActive(!isDetectionActive))}
-                  className={`dwell flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition ${isDetectionActive ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 hover:bg-gray-700'}`}
+                  className={`dwell px-3 py-1.5 rounded-md text-sm font-medium transition ${isDetectionActive ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-700 hover:bg-gray-600'}`}
                   disabled={!model}
                 >
-                  <Scan className="w-4 h-4" />
-                  <span>{isDetectionActive ? 'Stop Detection' : 'Start Detection'}</span>
+                  <div className="flex items-center gap-2">
+                    <Scan className="w-4 h-4" />
+                    <span>{isDetectionActive ? 'Stop' : 'Start'}</span>
+                  </div>
                 </button>
-                <AccessibilityPanel
-                  visual={visual} setVisual={setVisual}
-                  color={colorBlind} setColor={setColorBlind}
-                  hearing={hearing} setHearing={setHearing}
-                  motor={motor} setMotor={setMotor}
-                  cognitive={cognitive} setCognitive={setCognitive}
-                />
+                <button
+                  onClick={() => setControlsOpen((v) => !v)}
+                  className="px-3 py-1.5 rounded-md text-sm font-medium bg-gray-700 hover:bg-gray-600 flex items-center gap-2"
+                >
+                  <Settings className="w-4 h-4" />
+                  <span>Modes</span>
+                  <ChevronDown className={`w-4 h-4 transition ${controlsOpen ? 'rotate-180' : ''}`} />
+                </button>
               </div>
             </div>
+            {controlsOpen && (
+              <div className="bg-gray-800/95">
+                <div className="max-w-7xl mx-auto px-4 py-3">
+                  <AccessibilityPanel
+                    visual={visual} setVisual={setVisual}
+                    color={colorBlind} setColor={setColorBlind}
+                    hearing={hearing} setHearing={setHearing}
+                    motor={motor} setMotor={setMotor}
+                    cognitive={cognitive} setCognitive={setCognitive}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </header>
 
-        <main className="container mx-auto p-4">
-          <div className="max-w-6xl mx-auto cognitive-scope">
-            <div className="grid md:grid-cols-2 gap-6 mb-6">
-              <div className="bg-gray-800 p-6 rounded-xl">
-                <h2 className="text-xl font-semibold mb-2">Visual & Color Simulation</h2>
-                <p className="text-gray-300 mb-4">Switch visual levels and color blindness types in the panel to experience multiple conditions.</p>
-                <div className="bg-gray-700/50 p-4 rounded-lg text-sm text-gray-300">
-                  Supported visual: mild, moderate, severe, central scotoma, peripheral tunnel vision. Supported color: protanopia, deuteranopia, tritanopia, achromatopsia.
-                </div>
-              </div>
-              <div className="bg-gray-800 p-6 rounded-xl space-y-3">
-                <h2 className="text-xl font-semibold">Hearing Simulation</h2>
-                <p className="text-gray-300">Modes: normal, mute, low-pass, high-pass. Applies to captions + speech synthesis, and to audio sources.</p>
-                <div className="bg-gray-700/50 p-4 rounded-lg flex items-center gap-4">
-                  <span className="text-sm text-gray-300">Sample Audio</span>
-                  <audio ref={audioRef} src="/audio/sample.mp3" controls className="w-full" />
-                </div>
-                <p className="text-xs text-gray-400">Microphone processing is enabled automatically when switching to low-pass or high-pass.</p>
-              </div>
-            </div>
-
+        <main className="container mx-auto px-4 pt-16 pb-6">
+          <div className="max-w-7xl mx-auto cognitive-scope">
             <div className="grid lg:grid-cols-4 gap-6">
-              <div className="lg:col-span-1 bg-gray-800 p-6 rounded-xl h-[calc(100vh-24rem)] sticky top-28 overflow-y-auto">
+              <div className="lg:col-span-1 bg-gray-800 p-6 rounded-xl h-[calc(100vh-12rem)] sticky top-20 overflow-y-auto">
                 <div className="flex items-center space-x-2 mb-4">
                   <Scan className="w-6 h-6 text-blue-400" />
                   <h2 className="text-xl font-semibold">Detectable Objects</h2>
                 </div>
                 <div className="space-y-2">
-                  {commonObjects.map((obj) => (
+                  {indoorObjects.map((obj) => (
                     <div key={obj} className="flex items-center space-x-2 p-2 rounded bg-gray-700/50">
                       <div className="w-4 h-4 rounded-full" style={{ backgroundColor: getColorForClass(obj) }} />
                       <span className="capitalize">{obj}</span>
                     </div>
                   ))}
                 </div>
+
+                <div className="mt-6 bg-gray-800 p-4 rounded-xl space-y-3">
+                  <h3 className="font-semibold">Hearing Simulation</h3>
+                  <div className="bg-gray-700/50 p-3 rounded-lg flex items-center gap-3">
+                    <span className="text-sm text-gray-300">Sample Audio</span>
+                    <audio ref={audioRef} src="/audio/sample.mp3" controls className="w-full" />
+                  </div>
+                  <p className="text-xs text-gray-400">Microphone processing starts when mode ≠ normal. Live captions appear while any hearing mode is active.</p>
+                </div>
               </div>
 
               <div className="lg:col-span-3 space-y-6">
-                <div className="relative rounded-xl overflow-hidden bg-black h-[calc(100vh-24rem)]">
+                <div className="relative rounded-xl overflow-hidden bg-black h-[calc(100vh-12rem)]">
                   <Webcam
                     ref={webcamRef}
                     onUserMedia={handleUserMedia}
@@ -355,6 +455,12 @@ function App() {
                     audio={false}
                   />
                   <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full pointer-events-none" />
+
+                  {visual === 'central' && (
+                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                      <div className="w-64 h-64 rounded-full" style={{ boxShadow: '0 0 0 9999px rgba(0,0,0,0.9)' }} />
+                    </div>
+                  )}
 
                   {!isCameraReady && (
                     <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
