@@ -21,51 +21,48 @@ type MotorMode = 'normal' | 'singlehand';
 type CognitiveMode = 'normal' | 'dyslexia' | 'simplify';
 
 function App() {
+  // Detection
   const [isDetectionActive, setIsDetectionActive] = useState(false);
   const [model, setModel] = useState<cocoSsd.ObjectDetection | null>(null);
   const modelLoadingRef = useRef(false);
-
-  const [detectedObjects, setDetectedObjects] = useState<Array<{ class: string; score: number }>>([]);
-  const previousObjectsRef = useRef<Set<string>>(new Set());
-  const spokenOnceRef = useRef<Set<string>>(new Set());
-
   const webcamRef = useRef<Webcam | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationFrameRef = useRef<number>();
   const isDetectionRunningRef = useRef(false);
   const [isCameraReady, setIsCameraReady] = useState(false);
+  const [detectedObjects, setDetectedObjects] = useState<Array<{ class: string; score: number }>>([]);
+  const previousObjectsRef = useRef<Set<string>>(new Set());
+  const spokenOnceRef = useRef<Set<string>>(new Set());
 
+  // Modes
   const [visual, setVisual] = useState<VisualLevel>('none');
   const [colorBlind, setColorBlind] = useState<ColorBlind>('none');
   const [hearing, setHearing] = useState<HearingMode>('normal');
   const [motor, setMotor] = useState<MotorMode>('normal');
   const [cognitive, setCognitive] = useState<CognitiveMode>('normal');
   const [elderMode, setElderMode] = useState(false);
-
   const [controlsOpen, setControlsOpen] = useState(false);
 
+  // Captions
   const [detCaptions, setDetCaptions] = useState<string[]>([]);
   const [hearingCaptions, setHearingCaptions] = useState<string[]>([]);
 
+  // ASR (English only, on mute)
   const recognitionRef = useRef<any>(null);
   const asrRestartRef = useRef(false);
   const lastAsrTextRef = useRef<string>('');
   const asrDebounceRef = useRef<number | null>(null);
 
-  // Screen Reader (Sequence only)
+  // Screen Reader (Sequence only, robust start)
   const [readerActive, setReaderActive] = useState(false);
   const [readerRate, setReaderRate] = useState(1.0);
   const [readerQueue, setReaderQueue] = useState<string[]>([]);
-  const readerUtterRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const [ttsVoices, setTtsVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [voiceReady, setVoiceReady] = useState(false);
   const currentIndexRef = useRef<number>(0);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
 
-  useEffect(() => {
-    return () => stopDetection();
-  }, []);
+  useEffect(() => () => stopDetection(), []);
 
-  // ASR (English only, active when hearing === 'mute')
+  // ---------- ASR ----------
   const startASR = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return;
@@ -88,7 +85,7 @@ function App() {
       if (asrDebounceRef.current) window.clearTimeout(asrDebounceRef.current);
       asrDebounceRef.current = window.setTimeout(() => {
         setHearingCaptions(prev => [clean, ...prev].slice(0, 6));
-      }, 100);
+      }, 80);
     };
     rec.onend = () => {
       recognitionRef.current = null;
@@ -118,17 +115,7 @@ function App() {
     };
   }, [hearing, startASR]);
 
-  // Object detection
-  const speak = useCallback((text: string) => {
-    if (hearing !== 'mute') {
-      speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'en-US';
-      speechSynthesis.speak(u);
-    }
-    setDetCaptions(prev => [text, ...prev].slice(0, 6));
-  }, [hearing]);
-
+  // ---------- Object detection ----------
   const ensureModel = useCallback(async () => {
     if (model || modelLoadingRef.current) return;
     modelLoadingRef.current = true;
@@ -145,34 +132,17 @@ function App() {
   }, [model]);
 
   const colorMap: { [key: string]: string } = {
-    person: '#0072B2',
-    book: '#56B4E9',
-    'cell phone': '#009E73',
-    laptop: '#E69F00',
-    tv: '#CC79A7',
-    bottle: '#F0E442',
-    chair: '#8A4FAA',
-    cup: '#5AC8FA',
-    keyboard: '#D55E00',
-    mouse: '#8E8E93',
-    remote: '#9C27B0',
-    backpack: '#795548',
-    default: '#8E8E93'
+    person: '#0072B2', book: '#56B4E9', 'cell phone': '#009E73', laptop: '#E69F00',
+    tv: '#CC79A7', bottle: '#F0E442', chair: '#8A4FAA', cup: '#5AC8FA',
+    keyboard: '#D55E00', mouse: '#8E8E93', remote: '#9C27B0', backpack: '#795548', default: '#8E8E93'
   };
-
-  const indoorObjects = [
-    'person', 'book', 'cell phone', 'laptop', 'tv', 'bottle',
-    'chair', 'cup', 'keyboard', 'mouse', 'remote', 'backpack'
-  ];
-
-  const getColorForClass = (className: string) => colorMap[className] || colorMap.default;
+  const indoorObjects = ['person','book','cell phone','laptop','tv','bottle','chair','cup','keyboard','mouse','remote','backpack'];
+  const getColorForClass = (c: string) => colorMap[c] || colorMap.default;
 
   const stopDetection = useCallback(() => {
     isDetectionRunningRef.current = false;
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = undefined;
-    }
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    animationFrameRef.current = undefined;
     speechSynthesis.cancel();
     setDetectedObjects([]);
     previousObjectsRef.current.clear();
@@ -182,9 +152,18 @@ function App() {
     if (ctx && canvasRef.current) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
   }, []);
 
+  const speakDet = useCallback((text: string) => {
+    if (hearing !== 'mute') {
+      try { speechSynthesis.cancel(); } catch {}
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'en-US';
+      try { speechSynthesis.speak(u); } catch {}
+    }
+    setDetCaptions(prev => [text, ...prev].slice(0, 6));
+  }, [hearing]);
+
   const detectObjects = useCallback(async () => {
     if (!model || !webcamRef.current || !canvasRef.current || !isDetectionRunningRef.current) return;
-
     const video = webcamRef.current.video as HTMLVideoElement | null;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
@@ -203,10 +182,7 @@ function App() {
 
       setDetectedObjects(predictions.map(p => ({ class: p.class, score: p.score })));
 
-      newOnes.forEach(c => {
-        spokenOnceRef.current.add(c);
-        speak(`Detected ${c}`);
-      });
+      newOnes.forEach(c => { spokenOnceRef.current.add(c); speakDet(`Detected ${c}`); });
 
       const gone: string[] = [];
       previousObjectsRef.current.forEach(c => { if (!present.has(c)) gone.push(c); });
@@ -214,50 +190,45 @@ function App() {
       previousObjectsRef.current = present;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      predictions.forEach(prediction => {
-        const [x, y, width, height] = prediction.bbox;
-        const color = getColorForClass(prediction.class);
+      predictions.forEach(p => {
+        const [x, y, w, h] = p.bbox;
+        const color = getColorForClass(p.class);
         ctx.strokeStyle = color;
         ctx.lineWidth = 3;
-        ctx.strokeRect(x, y, width, height);
-
+        ctx.strokeRect(x, y, w, h);
         ctx.font = 'bold 16px Inter, system-ui, sans-serif';
-        const label = `${prediction.class} ${(prediction.score * 100).toFixed(1)}%`;
+        const label = `${p.class} ${(p.score * 100).toFixed(1)}%`;
         const metrics = ctx.measureText(label);
         const pad = 8;
         ctx.fillStyle = color;
         ctx.fillRect(x - pad / 2, y - 30, metrics.width + pad * 2, 30);
-        ctx.fillStyle = '#FFFFFF';
+        ctx.fillStyle = '#fff';
         ctx.fillText(label, x + pad / 2, y - 10);
       });
 
       if (isDetectionRunningRef.current) {
         animationFrameRef.current = requestAnimationFrame(detectObjects);
       }
-    } catch (error) {
-      console.error('Detection error:', error);
+    } catch (e) {
+      console.error('Detection error:', e);
       setIsDetectionActive(false);
       stopDetection();
     }
-  }, [model, speak, stopDetection]);
+  }, [model, speakDet, stopDetection]);
 
   useEffect(() => {
     if (isDetectionActive) {
       isDetectionRunningRef.current = true;
-      if (!model) {
-        ensureModel().then(() => requestAnimationFrame(detectObjects));
-      } else {
-        requestAnimationFrame(detectObjects);
-      }
+      if (!model) ensureModel().then(() => requestAnimationFrame(detectObjects));
+      else requestAnimationFrame(detectObjects);
     } else {
       stopDetection();
     }
-  }, [isDetectionActive, detectObjects, stopDetection, ensureModel, model]);
+  }, [isDetectionActive, detectObjects, ensureModel, stopDetection, model]);
 
-  const handleUserMedia = useCallback(() => {
-    setIsCameraReady(true);
-  }, []);
+  const handleUserMedia = useCallback(() => setIsCameraReady(true), []);
 
+  // ---------- Visual & Color ----------
   const visualClass = (() => {
     switch (visual) {
       case 'mild': return 'vis-mild';
@@ -283,8 +254,8 @@ function App() {
     ? { filter: `url(${colorFilterId})`, WebkitFilter: `url(${colorFilterId})` }
     : {};
 
+  // ---------- Cognitive ----------
   const originalTextMapRef = useRef<WeakMap<Text, string>>(new WeakMap());
-
   useEffect(() => {
     const root = document.querySelector('.cognitive-scope');
     if (!root) return;
@@ -301,9 +272,7 @@ function App() {
       }
       function scrambleTextNode(node: Text) {
         const orig = node.textContent ?? '';
-        if (!originalTextMapRef.current.get(node)) {
-          originalTextMapRef.current.set(node, orig);
-        }
+        if (!originalTextMapRef.current.get(node)) originalTextMapRef.current.set(node, orig);
         const scrambled = orig.replace(/[A-Za-zÀ-ÿ]{4,}/g, scrambleWord);
         if (scrambled !== orig) node.textContent = scrambled;
       }
@@ -326,25 +295,37 @@ function App() {
         const orig = originalTextMapRef.current.get(t);
         if (orig !== undefined && t.textContent !== orig) toRestore.push(t);
       }
-      toRestore.forEach((t) => {
+      toRestore.forEach(t => {
         const orig = originalTextMapRef.current.get(t);
         if (orig !== undefined) t.textContent = orig;
       });
     }
   }, [cognitive]);
 
-  // --- Screen Reader (Sequence) ---
-  function pickVoice(voices: SpeechSynthesisVoice[]) {
+  // ---------- Screen Reader: Sequence only ----------
+  // Load voices early; but Start Reading 不依赖它（没有可用 voice 也用默认）
+  useEffect(() => {
+    const load = () => setVoices(speechSynthesis.getVoices());
+    load();
+    // @ts-ignore
+    window.speechSynthesis.onvoiceschanged = load;
+    return () => {
+      // @ts-ignore
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+  }, []);
+
+  const pickVoice = useCallback(() => {
+    if (!voices || voices.length === 0) return null;
     const pref = ['en-US', 'en_US', 'en-GB', 'en_GB'];
     for (const tag of pref) {
       const v = voices.find(x => x.lang === tag);
       if (v) return v;
     }
     return voices[0] || null;
-  }
+  }, [voices]);
 
   const collectReadableWholePage = useCallback(() => {
-    // Read the whole page including header/nav/main footer; exclude scripts, code, inputs, svg, canvas, video
     const root = document.body;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const raw: string[] = [];
@@ -358,19 +339,18 @@ function App() {
       raw.push(s);
     }
     if (raw.length === 0) return ['Screen reader started. There is no readable text on screen.'];
-    // chunk by ~160 chars
     const joined = raw.join(' ').replace(/\s{2,}/g, ' ').trim();
     const chunks: string[] = [];
     let i = 0;
     while (i < joined.length) {
-      const end = Math.min(i + 160, joined.length);
+      const end = Math.min(i + 180, joined.length);
       chunks.push(joined.slice(i, end));
       i = end;
     }
-    return chunks.slice(0, 60);
+    return chunks.slice(0, 80);
   }, []);
 
-  function speakFrom(index: number) {
+  const speakFrom = useCallback((index: number) => {
     if (!readerActive || index < 0 || index >= readerQueue.length) {
       setReaderActive(false);
       return;
@@ -378,74 +358,50 @@ function App() {
     currentIndexRef.current = index;
     try { speechSynthesis.cancel(); } catch {}
     const u = new SpeechSynthesisUtterance(readerQueue[index]);
-    const v = pickVoice(ttsVoices);
-    if (v) {
-      u.voice = v;
-      u.lang = v.lang || 'en-US';
-    } else {
-      u.lang = 'en-US';
-    }
+    const v = pickVoice();
+    if (v) { u.voice = v; u.lang = v.lang || 'en-US'; } else { u.lang = 'en-US'; }
     u.rate = readerRate;
     u.onend = () => {
       if (!readerActive) return;
       speakFrom(index + 1);
     };
     try { speechSynthesis.speak(u); } catch {}
-    readerUtterRef.current = u;
-  }
+  }, [readerActive, readerQueue, readerRate, pickVoice]);
 
   const startReader = useCallback(() => {
-    if (!voiceReady) {
-      const vs = speechSynthesis.getVoices();
-      if (vs.length > 0) setTtsVoices(vs);
-    }
     const chunks = collectReadableWholePage();
     if (chunks.length === 0) return;
     setReaderQueue(chunks);
     setReaderActive(true);
-    // Use microtask to ensure state is set before speaking
-    queueMicrotask(() => speakFrom(0));
-  }, [voiceReady, collectReadableWholePage, ttsVoices, readerRate]);
+    // 立刻说第一段（用户手势内调用，规避浏览器自动播放限制）
+    try { speechSynthesis.cancel(); } catch {}
+    const first = new SpeechSynthesisUtterance(chunks[0]);
+    const v = pickVoice();
+    if (v) { first.voice = v; first.lang = v.lang || 'en-US'; } else { first.lang = 'en-US'; }
+    first.rate = readerRate;
+    first.onend = () => {
+      if (!readerActive) return;
+      setTimeout(() => speakFrom(1), 0);
+    };
+    try { speechSynthesis.speak(first); } catch {}
+    currentIndexRef.current = 0;
+  }, [collectReadableWholePage, readerRate, pickVoice, speakFrom, readerActive]);
 
   const stopReader = useCallback(() => {
     setReaderActive(false);
     setReaderQueue([]);
     try { speechSynthesis.cancel(); } catch {}
-    readerUtterRef.current = null;
   }, []);
 
-  // Apply new rate immediately during reading
+  // Rate change applies immediately: restart current utterance with same index
   useEffect(() => {
-    if (!readerActive) return;
-    // Restart current utterance with new rate from the same index
+    if (!readerActive || readerQueue.length === 0) return;
     const idx = currentIndexRef.current;
     try { speechSynthesis.cancel(); } catch {}
-    queueMicrotask(() => speakFrom(idx));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readerRate]);
+    setTimeout(() => speakFrom(idx), 0);
+  }, [readerRate, readerActive, readerQueue.length, speakFrom]);
 
-  // Voices ready
-  useEffect(() => {
-    function loadVoices() {
-      const vs = speechSynthesis.getVoices();
-      if (vs && vs.length > 0) {
-        setTtsVoices(vs);
-        setVoiceReady(true);
-      }
-    }
-    loadVoices();
-    if (typeof window !== 'undefined') {
-      window.speechSynthesis.onvoiceschanged = loadVoices;
-    }
-    return () => {
-      if (typeof window !== 'undefined') {
-        // @ts-ignore
-        window.speechSynthesis.onvoiceschanged = null;
-      }
-    };
-  }, []);
-
-  // --- UI helpers ---
+  // ---------- UI helpers ----------
   const iconLabel = (Icon: any, text: string) => (
     <span className="inline-flex items-center gap-1">
       <Icon className="w-4 h-4 opacity-80" />
